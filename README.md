@@ -89,6 +89,11 @@ results speak.
 - **Self-benchmarking.** `ramanujan bench <tasks...> -n 5` measures the agent
   system itself: goal-hit rate, mean experiments per run, failure taxonomy —
   so prompt/model/orchestration changes are evaluated with numbers.
+- **Plain-English front door.** `ramanujan ask "..."` composes a full task spec
+  from a natural-language request: data files named in the request are inspected
+  (columns, types, target candidates) so the spec describes the *real* schema,
+  the draft is schema-validated with self-repair, shown for confirmation, and
+  saved as a normal YAML — ad-hoc requests stay reproducible.
 
 ## Sample session (real output, offline demo)
 
@@ -114,6 +119,12 @@ responses are scripted in offline mode.
 
 ```bash
 pip install -e ".[dev]"
+
+# 0) Just say what you want (with any API key configured - see below):
+#    Ramanujan inspects your data, composes a validated task spec, shows it,
+#    and runs the research. The spec is saved so the run stays reproducible.
+ramanujan ask "predict customer churn from data/customers.csv, aim for AUC 0.85"
+ramanujan ask "classify sklearn digits as accurately as possible" --dry-run
 
 # 1) Zero-API-key demo: full system, scripted LLM, real sklearn training
 ramanujan run tasks/demo_breast_cancer.yaml --offline
@@ -210,6 +221,7 @@ ramanujan/
   orchestrator.py      # Research Director: deterministic loop around agentic steps
   task.py              # YAML task spec (dataset, metric, budgets, branches, data files)
   report.py            # final research report renderer (incl. cost telemetry)
+  composer.py          # natural-language -> TaskSpec (the `ask` command)
   bench.py             # self-benchmark harness (goal-hit rate, failure taxonomy)
   events.py            # append-only event stream per run (events.jsonl)
   dashboard.py         # zero-dependency live web dashboard over the event stream
@@ -243,7 +255,8 @@ tests/                 # 52 tests incl. full end-to-end research runs
 python -m pytest tests -v
 ```
 
-69 tests cover the ledger (incl. fold-spread reporting), the knowledge base
+77 tests cover the natural-language task composer (file detection, schema
+inspection, spec round-tripping), the ledger (incl. fold-spread reporting), the knowledge base
 (retrieval ranking, run exclusion, code storage, schema migration), the local and
 Docker executors (timeouts, crashes, stale-metrics protection, secret stripping,
 daemon-missing degradation), the agent tool loop (error feedback, step limits,

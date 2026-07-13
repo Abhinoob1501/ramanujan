@@ -98,6 +98,66 @@ def show(run_dir: Path = typer.Argument(..., help="A run directory under runs/."
 
 
 @app.command()
+def ask(
+    request: str = typer.Argument(
+        ..., help='Plain-English research request, e.g. '
+        '"predict churn from data/customers.csv, aim for AUC 0.85".'
+    ),
+    data: Optional[list[Path]] = typer.Option(
+        None, "--data", "-d", help="Data file(s) to attach (also auto-detected from the request)."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Run without confirmation."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Only compose and save the task spec; don't run it."
+    ),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider."),
+    runs_root: Path = typer.Option(Path("runs"), help="Directory for run artifacts."),
+):
+    """Describe what you want researched in plain English; Ramanujan composes
+    the task spec, shows it, and runs it."""
+    import yaml as _yaml
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+
+    from .composer import compose_task, detect_data_files, save_task
+    from .llm.factory import build_llm_suite
+
+    try:
+        suite = build_llm_suite(provider, Settings.from_env())
+    except RuntimeError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise typer.Exit(2)
+
+    files = detect_data_files(request, list(data) if data else None)
+    for path in files:
+        if not path.exists():
+            console.print(f"[red]Data file not found:[/red] {path}")
+            raise typer.Exit(2)
+    if files:
+        console.print(f"[dim]Inspecting data file(s): {', '.join(str(f) for f in files)}[/dim]")
+
+    console.print("[dim]Composing research task...[/dim]")
+    task = compose_task(suite.planner, request, files)
+    spec_path = save_task(task)
+    spec_yaml = _yaml.safe_dump(task.model_dump(), sort_keys=False, allow_unicode=True)
+    console.print(
+        Panel(
+            Syntax(spec_yaml, "yaml", background_color="default"),
+            title=f"Composed task (saved to {spec_path})",
+            border_style="cyan",
+        )
+    )
+    if dry_run:
+        console.print(f"Dry run - edit and launch later with: [bold]ramanujan run {spec_path}[/bold]")
+        raise typer.Exit(0)
+    if not yes:
+        typer.confirm("Run this research task now?", abort=True)
+
+    result = ResearchDirector(task, suite, runs_root=runs_root, console=console).run()
+    raise typer.Exit(0 if result.best is not None else 1)
+
+
+@app.command()
 def bench(
     task_files: list[Path] = typer.Argument(..., help="Task YAMLs to benchmark."),
     repeats: int = typer.Option(2, "--repeats", "-n", help="Runs per task."),

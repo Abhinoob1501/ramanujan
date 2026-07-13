@@ -14,3 +14,4 @@ dist/
 # experiment outputs
 runs/
 wandb/
+tasks/generated/
