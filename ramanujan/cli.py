@@ -109,6 +109,13 @@ def run(
         "verdict (override it in either direction).",
         rich_help_panel=_PANEL_OVERSIGHT,
     ),
+    web: bool = typer.Option(
+        False, "--web",
+        help="Like --interactive, but decisions are made from the web dashboard: the "
+        "run pauses at each checkpoint and shows approve/guide/stop buttons in the "
+        "browser (serve it with `ramanujan dashboard <run_dir>`).",
+        rich_help_panel=_PANEL_OVERSIGHT,
+    ),
     executor: Optional[str] = typer.Option(
         None, "--executor", "-x",
         help="Where generated training code runs, overriding the task spec: "
@@ -159,13 +166,29 @@ def run(
             raise typer.Exit(2)
 
     gate = None
-    if interactive or task.human_in_the_loop:
+    if not web and (interactive or task.human_in_the_loop):
         from .hitl import ConsoleGate
 
         gate = ConsoleGate(console)
 
-    result = ResearchDirector(task, llm, runs_root=runs_root, console=console, gate=gate).run()
+    director = ResearchDirector(task, llm, runs_root=runs_root, console=console, gate=gate)
+    if web:
+        director.gate = _arm_web_gate(director)
+    result = director.run()
     raise typer.Exit(0 if result.best is not None else 1)
+
+
+def _arm_web_gate(director: ResearchDirector):
+    """Web-gated runs make decisions from the dashboard; the gate exchanges
+    files in the run directory, which the dashboard serves buttons for."""
+    from .hitl import FileGate
+
+    console.print(
+        f"[bold cyan]Web gate armed.[/bold cyan] In another terminal run:\n"
+        f"  ramanujan dashboard \"{director.run_dir}\"\n"
+        "then decide each checkpoint from http://127.0.0.1:8787"
+    )
+    return FileGate(director.run_dir, console=console)
 
 
 @app.command(epilog="Example:\n\n  ramanujan show runs/20260714_010606_breast-cancer-diagnosis_a488db")
@@ -243,6 +266,12 @@ def ask(
         "critic verdicts as the research runs.",
         rich_help_panel=_PANEL_OVERSIGHT,
     ),
+    web: bool = typer.Option(
+        False, "--web",
+        help="Like --interactive, but decisions are made from the web dashboard "
+        "(serve it with `ramanujan dashboard <run_dir>`).",
+        rich_help_panel=_PANEL_OVERSIGHT,
+    ),
     executor: Optional[str] = typer.Option(
         None, "--executor", "-x",
         help="Where generated training code runs: 'local' (this machine; local NVIDIA "
@@ -301,12 +330,15 @@ def ask(
         typer.confirm("Run this research task now?", abort=True)
 
     gate = None
-    if interactive:
+    if interactive and not web:
         from .hitl import ConsoleGate
 
         gate = ConsoleGate(console)
 
-    result = ResearchDirector(task, suite, runs_root=runs_root, console=console, gate=gate).run()
+    director = ResearchDirector(task, suite, runs_root=runs_root, console=console, gate=gate)
+    if web:
+        director.gate = _arm_web_gate(director)
+    result = director.run()
     raise typer.Exit(0 if result.best is not None else 1)
 
 

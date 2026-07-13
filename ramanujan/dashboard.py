@@ -50,6 +50,18 @@ _PAGE = """<!DOCTYPE html>
   .toollog { color:var(--dim); font-size:12px; margin:2px 0 2px 12px; white-space:pre-wrap; }
   .metric { font-size:18px; color:var(--green); font-weight:bold; }
   .dim { color:var(--dim); }
+  #gate { display:none; position:sticky; top:56px; z-index:10; background:#1c1608;
+          border:1px solid var(--amber); border-left:4px solid var(--amber);
+          border-radius:6px; padding:12px 16px; margin:10px 0; }
+  #gate .who { color:var(--amber); }
+  #gate textarea { width:100%; box-sizing:border-box; margin:8px 0; padding:8px;
+          background:var(--bg); color:var(--text); border:1px solid var(--border);
+          border-radius:4px; font:inherit; min-height:54px; }
+  #gate button { background:var(--card); color:var(--text); border:1px solid var(--border);
+          border-radius:5px; padding:7px 16px; margin-right:8px; font:inherit; cursor:pointer; }
+  #gate button:hover { border-color:var(--cyan); }
+  #gate button.primary { border-color:var(--green); color:var(--green); }
+  #gate button.danger { border-color:var(--red); color:var(--red); }
 </style>
 </head>
 <body>
@@ -59,7 +71,10 @@ _PAGE = """<!DOCTYPE html>
   <span id="status" class="badge">connecting</span>
   <span id="best"></span>
 </header>
-<main id="feed"></main>
+<main>
+  <div id="gate"></div>
+  <div id="feed"></div>
+</main>
 <script>
 let last = 0, direction = "maximize", metricName = "", best = null, finished = false;
 const feed = document.getElementById("feed");
@@ -131,6 +146,46 @@ function render(ev) {
       break;
   }
 }
+let gateShownId = null;
+async function pollGate() {
+  const el = document.getElementById("gate");
+  try {
+    const g = await (await fetch("/api/gate")).json();
+    if (!g || !g.id) { el.style.display = "none"; gateShownId = null; return; }
+    if (g.id === gateShownId) return;
+    gateShownId = g.id;
+    const p = g.payload || {};
+    if (g.type === "plan") {
+      el.innerHTML =
+        `<div class="who">YOUR DECISION NEEDED - round ${g.iteration} plans</div>` +
+        (p.plans || []).map(pl => `<div><b>${esc(pl.hypothesis)}</b>` +
+          `<div class="dim">${esc(pl.approach)}</div></div>`).join("") +
+        `<textarea id="guidance" placeholder="Optional guidance for the planner ` +
+        `(used with 'Guide & re-plan'), e.g. 'only tree models'"></textarea>` +
+        `<div><button class="primary" onclick="respond('approve')">Run these</button>` +
+        `<button onclick="respond('revise')">Guide &amp; re-plan</button>` +
+        `<button class="danger" onclick="respond('stop')">Stop research</button></div>`;
+    } else {
+      const alt = p.decision === "continue"
+        ? ["stop_now", "Stop now"] : ["continue_anyway", "Continue anyway"];
+      el.innerHTML =
+        `<div class="who">YOUR DECISION NEEDED - critic verdict: ${esc(p.decision)}</div>` +
+        `<div class="dim">${esc(p.reasoning)}</div>` +
+        `<div style="margin-top:8px"><button class="primary" onclick="respond('accept')">Accept</button>` +
+        `<button class="danger" onclick="respond('${alt[0]}')">${alt[1]}</button></div>`;
+    }
+    el.style.display = "block";
+  } catch (e) { /* run not gated or server briefly away */ }
+}
+async function respond(action) {
+  const box = document.getElementById("guidance");
+  await fetch("/api/gate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: gateShownId, action: action, guidance: box ? box.value : "" }),
+  });
+  document.getElementById("gate").style.display = "none";
+}
 async function poll() {
   try {
     const res = await fetch(`/api/events?since=${last}`);
@@ -144,6 +199,7 @@ async function poll() {
     document.getElementById("status").textContent = "disconnected";
     document.getElementById("status").className = "badge";
   }
+  await pollGate();
   setTimeout(poll, finished ? 5000 : 1500);
 }
 poll();
@@ -153,7 +209,11 @@ poll();
 """
 
 
-def make_handler(events_path: Path):
+def make_handler(run_dir: Path):
+    events_path = Path(run_dir) / "events.jsonl"
+    request_path = Path(run_dir) / "gate_request.json"
+    response_path = Path(run_dir) / "gate_response.json"
+
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 (stdlib API)
             parsed = urlparse(self.path)
@@ -166,8 +226,50 @@ def make_handler(events_path: Path):
                     {"events": events, "last": events[-1]["seq"] if events else since}
                 ).encode("utf-8")
                 self._send(200, "application/json", body)
+            elif parsed.path == "/api/gate":
+                self._send(200, "application/json", json.dumps(self._pending_gate()).encode("utf-8"))
             else:
                 self._send(404, "text/plain", b"not found")
+
+        def do_POST(self):  # noqa: N802 (stdlib API)
+            parsed = urlparse(self.path)
+            if parsed.path != "/api/gate":
+                self._send(404, "text/plain", b"not found")
+                return
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            try:
+                decision = json.loads(self.rfile.read(length).decode("utf-8"))
+                assert isinstance(decision.get("id"), int)
+                assert decision.get("action") in (
+                    "approve", "revise", "stop", "accept", "continue_anyway", "stop_now"
+                )
+            except Exception:
+                self._send(400, "application/json", b'{"ok": false, "error": "bad decision"}')
+                return
+            response_path.write_text(
+                json.dumps({"id": decision["id"], "action": decision["action"],
+                            "guidance": str(decision.get("guidance", ""))}),
+                encoding="utf-8",
+            )
+            self._send(200, "application/json", b'{"ok": true}')
+
+        def _pending_gate(self) -> dict:
+            """The open gate request, if the run is waiting on a human."""
+            if not request_path.exists():
+                return {}
+            try:
+                # utf-8-sig: tolerate a BOM in hand-written files on Windows
+                request = json.loads(request_path.read_text(encoding="utf-8-sig"))
+            except (json.JSONDecodeError, OSError):
+                return {}
+            if response_path.exists():
+                try:
+                    answered = json.loads(response_path.read_text(encoding="utf-8-sig"))
+                    if answered.get("id") == request.get("id"):
+                        return {}  # already answered; waiting for the run to consume it
+                except (json.JSONDecodeError, OSError):
+                    pass
+            return request
 
         def _send(self, status: int, content_type: str, body: bytes) -> None:
             self.send_response(status)
@@ -184,8 +286,7 @@ def make_handler(events_path: Path):
 
 
 def serve_dashboard(run_dir: str | Path, port: int = 8787) -> None:
-    events_path = Path(run_dir) / "events.jsonl"
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(events_path))
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(Path(run_dir)))
     print(f"Dashboard for {run_dir} -> http://127.0.0.1:{port}  (Ctrl+C to stop)")
     try:
         server.serve_forever()

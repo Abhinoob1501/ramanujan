@@ -15,7 +15,10 @@ are unchanged.
 
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Protocol
 
 from rich.console import Console
@@ -49,6 +52,97 @@ class AutoGate:
 
     def review_verdict(self, verdict: Verdict, iteration: int) -> VerdictReview:
         return VerdictReview(action="accept")
+
+
+GATE_REQUEST_FILE = "gate_request.json"
+GATE_RESPONSE_FILE = "gate_response.json"
+
+
+class FileGate:
+    """File-backed gate: decisions arrive as JSON files, so any remote UI can
+    drive them - the web dashboard serves buttons that write the response
+    (used with `ramanujan run --web`).
+
+    Protocol per checkpoint:
+      1. write <run_dir>/gate_request.json  {id, type, iteration, payload}
+      2. poll for <run_dir>/gate_response.json with a matching id
+      3. consume both files and return the decision
+
+    With no timeout it waits indefinitely (that is the point of a human gate);
+    pass timeout_seconds to auto-approve unattended runs.
+    """
+
+    def __init__(
+        self,
+        control_dir: str | Path,
+        console: Console | None = None,
+        poll_interval: float = 1.0,
+        timeout_seconds: float | None = None,
+    ):
+        self.control_dir = Path(control_dir)
+        self.control_dir.mkdir(parents=True, exist_ok=True)
+        self.request_path = self.control_dir / GATE_REQUEST_FILE
+        self.response_path = self.control_dir / GATE_RESPONSE_FILE
+        self.console = console or Console()
+        self.poll_interval = poll_interval
+        self.timeout_seconds = timeout_seconds
+        self._next_id = 1
+
+    def review_plans(self, plans: list[ExperimentPlan], iteration: int) -> PlanReview:
+        payload = {
+            "plans": [{"hypothesis": p.hypothesis, "approach": p.approach} for p in plans]
+        }
+        response = self._exchange("plan", iteration, payload)
+        action = response.get("action", "approve")
+        if action == "revise" and str(response.get("guidance", "")).strip():
+            return PlanReview(action="revise", guidance=str(response["guidance"]).strip())
+        if action == "stop":
+            return PlanReview(action="stop")
+        return PlanReview(action="approve")
+
+    def review_verdict(self, verdict: Verdict, iteration: int) -> VerdictReview:
+        payload = {"decision": verdict.decision, "reasoning": verdict.reasoning}
+        response = self._exchange("verdict", iteration, payload)
+        action = response.get("action", "accept")
+        if action in ("continue_anyway", "stop_now"):
+            return VerdictReview(action=action)
+        return VerdictReview(action="accept")
+
+    def _exchange(self, kind: str, iteration: int, payload: dict) -> dict:
+        request_id = self._next_id
+        self._next_id += 1
+        self.response_path.unlink(missing_ok=True)  # stale answers must not apply
+        self.request_path.write_text(
+            json.dumps(
+                {"id": request_id, "type": kind, "iteration": iteration,
+                 "payload": payload, "ts": time.time()}
+            ),
+            encoding="utf-8",
+        )
+        self.console.print(
+            f"[bold cyan]Waiting for your decision in the dashboard[/bold cyan] "
+            f"({kind} review, round {iteration}) - "
+            f"serve it with: ramanujan dashboard {self.control_dir}"
+        )
+        deadline = time.time() + self.timeout_seconds if self.timeout_seconds else None
+        while True:
+            if self.response_path.exists():
+                try:
+                    # utf-8-sig: tolerate a BOM in hand-written files on Windows
+                    response = json.loads(self.response_path.read_text(encoding="utf-8-sig"))
+                except (json.JSONDecodeError, OSError):
+                    response = None  # torn write; next poll gets it
+                if response and response.get("id") == request_id:
+                    self.request_path.unlink(missing_ok=True)
+                    self.response_path.unlink(missing_ok=True)
+                    return response
+            if deadline is not None and time.time() > deadline:
+                self.request_path.unlink(missing_ok=True)
+                self.console.print(
+                    "[yellow]No decision arrived before the timeout - auto-approving.[/yellow]"
+                )
+                return {}
+            time.sleep(self.poll_interval)
 
 
 class ConsoleGate:

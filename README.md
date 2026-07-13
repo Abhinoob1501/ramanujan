@@ -106,12 +106,15 @@ results speak.
   NVIDIA GPU with working PyTorch CUDA is present, every agent is told it may
   train on `device='cuda'`; otherwise they're told the truth about CPU-only.
   `RAMANUJAN_FORCE_CPU=1` pins runs to CPU regardless.
-- **Human-in-the-loop, opt-in.** Run with `-i` (or set `human_in_the_loop: true`)
-  and the loop pauses at the two checkpoints where human judgment is cheapest:
-  before compute is spent (approve the round's plans, type free-text guidance to
-  force a re-plan, or stop) and after the critic rules (accept, or override in
-  either direction). Guidance is remembered and injected into every later
-  planning round. The default remains fully autonomous.
+- **Human-in-the-loop, opt-in — terminal or browser.** Run with `-i` (or set
+  `human_in_the_loop: true`) and the loop pauses at the two checkpoints where
+  human judgment is cheapest: before compute is spent (approve the round's plans,
+  type free-text guidance to force a re-plan, or stop) and after the critic rules
+  (accept, or override in either direction). Guidance is remembered and injected
+  into every later planning round. With `--web` the same gate is driven from the
+  live dashboard instead: the run pauses, a decision card appears in the browser
+  with Run / Guide-and-replan / Stop buttons (file-backed request/response, so
+  any remote UI could drive it). The default remains fully autonomous.
 - **Plain-English front door.** `ramanujan ask "..."` composes a full task spec
   from a natural-language request: data files named in the request are inspected
   (columns, types, target candidates) so the spec describes the *real* schema,
@@ -163,6 +166,10 @@ ramanujan run tasks/digits_multiclass.yaml -p openrouter   # or force one
 
 # 3) Watch a run live (or replay a finished one) in the browser
 ramanujan dashboard runs/<run_dir>        # -> http://127.0.0.1:8787
+
+# 3b) Steer a run FROM the browser: approve/guide/stop buttons appear
+#     in the dashboard at each checkpoint
+ramanujan run tasks/churn_csv.yaml --web   # + `ramanujan dashboard <run_dir>` in another terminal
 
 # 4) Bring your own CSV + parallel branches (see the spec for the knobs)
 ramanujan run tasks/churn_csv.yaml
@@ -244,7 +251,7 @@ Generated code is contained, not merely trusted. Two tiers:
 ```
 ramanujan/
   orchestrator.py      # Research Director: deterministic loop around agentic steps
-  hitl.py              # human-in-the-loop gates (plan approval, verdict override)
+  hitl.py              # human-in-the-loop gates: console, or file-backed web gate
   hardware.py          # local GPU/CPU detection (informs every agent's prompts)
   task.py              # YAML task spec (dataset, metric, budgets, branches, data files)
   report.py            # final research report renderer (incl. cost telemetry)
@@ -283,7 +290,9 @@ tests/                 # 52 tests incl. full end-to-end research runs
 python -m pytest tests -v
 ```
 
-100 tests cover executor selection (overrides, billing confirmation, hardware
+108 tests cover the web gate (file exchange protocol, stale-response rejection,
+timeout auto-approve, dashboard HTTP API round-trip, bad-decision rejection),
+executor selection (overrides, billing confirmation, hardware
 detection and prompt injection), the human-in-the-loop gates (guidance re-planning, stop, verdict
 overrides in both directions), the EDA agent (exploration, distillation, contained failure),
 the natural-language task composer (file detection, schema
@@ -306,5 +315,3 @@ and Windows on every push.
   which respects free-tier LLM rate limits)
 - GPU-fleet mode: reuse one warm RunPod pod across experiments instead of
   create/destroy per experiment
-- Approve/guide controls in the web dashboard (the CLI gate, file-backed, could
-  be driven remotely)
