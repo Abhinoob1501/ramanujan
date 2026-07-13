@@ -1,0 +1,30 @@
+# GPU showcase task: runs each experiment on a freshly created RunPod GPU pod.
+# Requirements:
+#   - runpodctl installed and configured (runpodctl config --apiKey ...)
+#   - billing credit on the RunPod account
+#   - set runpod.confirm_billing: true below to acknowledge GPU cost
+name: cifar10-image-classification
+description: >
+  Maximize test accuracy on CIFAR-10 within a small GPU budget. Each
+  experiment trains a convolutional network from scratch on a RunPod GPU.
+dataset: |
+  CIFAR-10 via torchvision.datasets.CIFAR10 (download=True). Standard
+  50k train / 10k test split. Normalize with the usual CIFAR-10 statistics.
+metric:
+  name: test_accuracy
+  goal: 0.90
+  direction: maximize
+budget:
+  max_iterations: 3
+  max_debug_attempts: 2
+  experiment_timeout_seconds: 2400
+executor: runpod
+environment_notes: >
+  Remote pod with PyTorch + CUDA (single NVIDIA GPU) and torchvision.
+  Train within the time limit (suggest <= 25 epochs with a cosine schedule).
+  Remember: report metrics by PRINTING the RAMANUJAN_METRICS:: line, not by
+  writing a file.
+runpod:
+  gpu_type: "NVIDIA GeForce RTX 4090"
+  image: "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
+  confirm_billing: false

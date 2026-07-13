@@ -1,0 +1,21 @@
+name: digits-classification
+description: >
+  Maximize accuracy on the sklearn handwritten-digits dataset (8x8 images,
+  10 classes). A good live-mode task: hard enough that the first baseline
+  usually does not hit the goal, so the planner has real decisions to make.
+dataset: |
+  Load with sklearn.datasets.load_digits(return_X_y=True).
+  1797 samples, 64 pixel features (values 0-16), 10 classes.
+  No download required - the dataset ships with scikit-learn.
+metric:
+  name: accuracy
+  goal: 0.99
+  direction: maximize
+budget:
+  max_iterations: 5
+  max_debug_attempts: 3
+  experiment_timeout_seconds: 300
+executor: local
+environment_notes: >
+  Python with scikit-learn, numpy and pandas available. CPU only - keep
+  each experiment under the time limit. No internet access from the script.

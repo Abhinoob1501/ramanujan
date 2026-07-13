@@ -1,0 +1,20 @@
+name: breast-cancer-diagnosis
+description: >
+  Maximize diagnostic ranking quality on the Wisconsin breast-cancer dataset.
+  Find the best-performing, methodologically sound classifier within budget.
+dataset: |
+  Load with sklearn.datasets.load_breast_cancer(return_X_y=True).
+  569 samples, 30 numeric features, binary target (malignant vs benign).
+  No download required - the dataset ships with scikit-learn.
+metric:
+  name: roc_auc
+  goal: 0.995
+  direction: maximize
+budget:
+  max_iterations: 4
+  max_debug_attempts: 3
+  experiment_timeout_seconds: 300
+executor: local
+environment_notes: >
+  Python with scikit-learn, numpy and pandas available. CPU only - keep
+  each experiment under the time limit. No internet access from the script.
