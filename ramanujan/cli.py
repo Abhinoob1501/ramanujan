@@ -39,6 +39,10 @@ def run(
         help="LLM provider: gemini | openrouter | opencode (Zen) | custom. "
         "Default: auto-detect from whichever API key is set.",
     ),
+    interactive: bool = typer.Option(
+        False, "--interactive", "-i",
+        help="Human-in-the-loop: pause to approve/guide plans and review verdicts.",
+    ),
     runs_root: Path = typer.Option(Path("runs"), help="Directory where run artifacts are stored."),
 ):
     """Run an autonomous research session on a task."""
@@ -66,7 +70,13 @@ def run(
             console.print(f"[red]Configuration error:[/red] {exc}")
             raise typer.Exit(2)
 
-    result = ResearchDirector(task, llm, runs_root=runs_root, console=console).run()
+    gate = None
+    if interactive or task.human_in_the_loop:
+        from .hitl import ConsoleGate
+
+        gate = ConsoleGate(console)
+
+    result = ResearchDirector(task, llm, runs_root=runs_root, console=console, gate=gate).run()
     raise typer.Exit(0 if result.best is not None else 1)
 
 
@@ -111,6 +121,10 @@ def ask(
         False, "--dry-run", help="Only compose and save the task spec; don't run it."
     ),
     provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider."),
+    interactive: bool = typer.Option(
+        False, "--interactive", "-i",
+        help="Human-in-the-loop: pause to approve/guide plans and review verdicts.",
+    ),
     runs_root: Path = typer.Option(Path("runs"), help="Directory for run artifacts."),
 ):
     """Describe what you want researched in plain English; Ramanujan composes
@@ -153,7 +167,13 @@ def ask(
     if not yes:
         typer.confirm("Run this research task now?", abort=True)
 
-    result = ResearchDirector(task, suite, runs_root=runs_root, console=console).run()
+    gate = None
+    if interactive:
+        from .hitl import ConsoleGate
+
+        gate = ConsoleGate(console)
+
+    result = ResearchDirector(task, suite, runs_root=runs_root, console=console, gate=gate).run()
     raise typer.Exit(0 if result.best is not None else 1)
 
 

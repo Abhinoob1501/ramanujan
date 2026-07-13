@@ -99,6 +99,12 @@ results speak.
   and the distilled findings are injected into every planning round and the final
   report. Planner hypotheses are grounded in the actual data, not priors. EDA
   failure never sinks a run; disable per task with `eda: false`.
+- **Human-in-the-loop, opt-in.** Run with `-i` (or set `human_in_the_loop: true`)
+  and the loop pauses at the two checkpoints where human judgment is cheapest:
+  before compute is spent (approve the round's plans, type free-text guidance to
+  force a re-plan, or stop) and after the critic rules (accept, or override in
+  either direction). Guidance is remembered and injected into every later
+  planning round. The default remains fully autonomous.
 - **Plain-English front door.** `ramanujan ask "..."` composes a full task spec
   from a natural-language request: data files named in the request are inspected
   (columns, types, target candidates) so the spec describes the *real* schema,
@@ -135,6 +141,7 @@ pip install -e ".[dev]"
 #    and runs the research. The spec is saved so the run stays reproducible.
 ramanujan ask "predict customer churn from data/customers.csv, aim for AUC 0.85"
 ramanujan ask "classify sklearn digits as accurately as possible" --dry-run
+ramanujan ask "model churn from data/customers.csv" -i   # human-in-the-loop mode
 
 # 1) Zero-API-key demo: full system, scripted LLM, real sklearn training
 ramanujan run tasks/demo_breast_cancer.yaml --offline
@@ -229,6 +236,7 @@ Generated code is contained, not merely trusted. Two tiers:
 ```
 ramanujan/
   orchestrator.py      # Research Director: deterministic loop around agentic steps
+  hitl.py              # human-in-the-loop gates (plan approval, verdict override)
   task.py              # YAML task spec (dataset, metric, budgets, branches, data files)
   report.py            # final research report renderer (incl. cost telemetry)
   composer.py          # natural-language -> TaskSpec (the `ask` command)
@@ -266,7 +274,8 @@ tests/                 # 52 tests incl. full end-to-end research runs
 python -m pytest tests -v
 ```
 
-82 tests cover the EDA agent (exploration, distillation, contained failure),
+89 tests cover the human-in-the-loop gates (guidance re-planning, stop, verdict
+overrides in both directions), the EDA agent (exploration, distillation, contained failure),
 the natural-language task composer (file detection, schema
 inspection, spec round-tripping), the ledger (incl. fold-spread reporting), the knowledge base
 (retrieval ranking, run exclusion, code storage, schema migration), the local and
@@ -287,4 +296,5 @@ and Windows on every push.
   which respects free-tier LLM rate limits)
 - GPU-fleet mode: reuse one warm RunPod pod across experiments instead of
   create/destroy per experiment
-- Human-in-the-loop checkpoints (pause for approval between rounds)
+- Approve/guide controls in the web dashboard (the CLI gate, file-backed, could
+  be driven remotely)

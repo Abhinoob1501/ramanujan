@@ -60,6 +60,11 @@ class TaskSpec(BaseModel):
     dataset: str = Field(description="How to obtain/load the data, told verbatim to the engineer.")
     metric: MetricSpec
     budget: BudgetSpec = BudgetSpec()
+    human_in_the_loop: bool = Field(
+        default=False,
+        description="Pause at plan and verdict checkpoints for interactive human "
+        "review (same as running with --interactive).",
+    )
     eda: bool = Field(
         default=True,
         description="Run the EDA agent before planning (skipped automatically for "

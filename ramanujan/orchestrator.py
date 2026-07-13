@@ -45,6 +45,7 @@ from .agents.roles import (
 )
 from .events import EventLog
 from .executors import build_executor
+from .hitl import AutoGate, HumanGate
 from .llm.base import LLMBudgetExceeded, LLMClient
 from .llm.factory import LLMSuite
 from .memory.knowledge import KnowledgeBase, format_for_prompt
@@ -71,10 +72,12 @@ class ResearchDirector:
         runs_root: str | Path = "runs",
         console: Console | None = None,
         knowledge: KnowledgeBase | None = None,
+        gate: HumanGate | None = None,
     ):
         self.task = task
         self.llms = llm if isinstance(llm, LLMSuite) else LLMSuite.for_single(llm)
         self.console = console or Console()
+        self.gate: HumanGate = gate or AutoGate()
         stamp = time.strftime("%Y%m%d_%H%M%S")
         # uuid suffix: run ids must be unique even for runs started in the same
         # second (they key knowledge-base exclusion and W&B grouping)
@@ -90,6 +93,7 @@ class ResearchDirector:
         self._current_iteration: int | None = None
         self._reference_code = ""
         self._eda_findings: EdaFindings | None = None
+        self._human_guidance: list[str] = []
 
     # ------------------------------------------------------------------ public
 
@@ -115,7 +119,17 @@ class ResearchDirector:
                 self.console.rule(f"[bold]Round {iteration}/{task.budget.max_iterations}")
                 self.events.emit("round", "round_started", iteration=iteration)
 
-                plans = self._plan_round(iteration, rounds_left, prior_knowledge)
+                plans = self._plan_round(
+                    iteration, rounds_left, self._augment_context(prior_knowledge)
+                )
+
+                # human gate: approve / guide-and-replan / stop, before compute is spent
+                plans, stopped_by_human = self._human_plan_gate(
+                    plans, iteration, rounds_left, prior_knowledge
+                )
+                if stopped_by_human:
+                    stop_reason = "stopped_by_human"
+                    break
 
                 analysis: Analysis | None = None
                 round_had_success = False
@@ -140,7 +154,22 @@ class ResearchDirector:
                     payload={"decision": verdict.decision, "reasoning": verdict.reasoning,
                              "concerns": verdict.concerns},
                 )
-                if verdict.decision != "continue":
+
+                # human gate: accept the verdict or override it in either direction
+                review = self.gate.review_verdict(verdict, iteration)
+                if review.action != "accept":
+                    self.events.emit(
+                        "human", "verdict_overridden", iteration=iteration,
+                        payload={"critic_decision": verdict.decision, "human_action": review.action},
+                    )
+                    self._panel(
+                        "Human", f"Verdict overridden: [bold]{review.action}[/bold] "
+                                 f"(critic said {verdict.decision})", "cyan",
+                    )
+                if review.action == "stop_now":
+                    stop_reason = "stopped_by_human"
+                    break
+                if verdict.decision != "continue" and review.action != "continue_anyway":
                     stop_reason = verdict.decision
                     break
         except LLMBudgetExceeded as exc:
@@ -297,6 +326,44 @@ class ResearchDirector:
             error_summary=outcome.error_summary or None,
         )
         return outcome, analysis
+
+    # ------------------------------------------------------------ human gate
+
+    def _augment_context(self, prior_knowledge: str) -> str:
+        """Planning context = prior knowledge + all human guidance so far."""
+        if not self._human_guidance:
+            return prior_knowledge
+        guidance = "HUMAN GUIDANCE (must be followed):\n" + "\n".join(
+            f"- {item}" for item in self._human_guidance
+        )
+        return f"{prior_knowledge}\n\n{guidance}" if prior_knowledge else guidance
+
+    def _human_plan_gate(
+        self,
+        plans: list[ExperimentPlan],
+        iteration: int,
+        rounds_left: int,
+        prior_knowledge: str,
+        max_revisions: int = 3,
+    ) -> tuple[list[ExperimentPlan], bool]:
+        """Returns (possibly re-planned plans, stopped_by_human)."""
+        for _ in range(max_revisions + 1):
+            review = self.gate.review_plans(plans, iteration)
+            if review.action == "approve":
+                return plans, False
+            if review.action == "stop":
+                self.events.emit("human", "research_stopped", iteration=iteration)
+                return plans, True
+            self._human_guidance.append(review.guidance)
+            self._panel("Human", f"Guidance: {review.guidance} - re-planning.", "cyan")
+            self.events.emit(
+                "human", "guidance_given", iteration=iteration,
+                payload={"guidance": review.guidance},
+            )
+            plans = self._plan_round(
+                iteration, rounds_left, self._augment_context(prior_knowledge)
+            )
+        return plans, False  # revision budget spent; run what we have
 
     # ------------------------------------------------------------------- eda
 
