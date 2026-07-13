@@ -99,6 +99,13 @@ results speak.
   and the distilled findings are injected into every planning round and the final
   report. Planner hypotheses are grounded in the actual data, not priors. EDA
   failure never sinks a run; disable per task with `eda: false`.
+- **You choose where code runs.** `--executor/-x local|docker|runpod` on `run`
+  and `ask` overrides any task spec: your own machine, a network-isolated Docker
+  container, or a RunPod GPU pod (with an explicit billing confirmation before
+  any pod is created). For local runs the hardware is auto-detected — if an
+  NVIDIA GPU with working PyTorch CUDA is present, every agent is told it may
+  train on `device='cuda'`; otherwise they're told the truth about CPU-only.
+  `RAMANUJAN_FORCE_CPU=1` pins runs to CPU regardless.
 - **Human-in-the-loop, opt-in.** Run with `-i` (or set `human_in_the_loop: true`)
   and the loop pauses at the two checkpoints where human judgment is cheapest:
   before compute is spent (approve the round's plans, type free-text guidance to
@@ -142,6 +149,7 @@ pip install -e ".[dev]"
 ramanujan ask "predict customer churn from data/customers.csv, aim for AUC 0.85"
 ramanujan ask "classify sklearn digits as accurately as possible" --dry-run
 ramanujan ask "model churn from data/customers.csv" -i   # human-in-the-loop mode
+ramanujan ask "train an image classifier on CIFAR-10" -x runpod   # you pick the hardware
 
 # 1) Zero-API-key demo: full system, scripted LLM, real sklearn training
 ramanujan run tasks/demo_breast_cancer.yaml --offline
@@ -237,6 +245,7 @@ Generated code is contained, not merely trusted. Two tiers:
 ramanujan/
   orchestrator.py      # Research Director: deterministic loop around agentic steps
   hitl.py              # human-in-the-loop gates (plan approval, verdict override)
+  hardware.py          # local GPU/CPU detection (informs every agent's prompts)
   task.py              # YAML task spec (dataset, metric, budgets, branches, data files)
   report.py            # final research report renderer (incl. cost telemetry)
   composer.py          # natural-language -> TaskSpec (the `ask` command)
@@ -274,7 +283,8 @@ tests/                 # 52 tests incl. full end-to-end research runs
 python -m pytest tests -v
 ```
 
-89 tests cover the human-in-the-loop gates (guidance re-planning, stop, verdict
+100 tests cover executor selection (overrides, billing confirmation, hardware
+detection and prompt injection), the human-in-the-loop gates (guidance re-planning, stop, verdict
 overrides in both directions), the EDA agent (exploration, distillation, contained failure),
 the natural-language task composer (file detection, schema
 inspection, spec round-tripping), the ledger (incl. fold-spread reporting), the knowledge base

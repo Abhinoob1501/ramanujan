@@ -45,6 +45,7 @@ from .agents.roles import (
 )
 from .events import EventLog
 from .executors import build_executor
+from .hardware import local_hardware_note
 from .hitl import AutoGate, HumanGate
 from .llm.base import LLMBudgetExceeded, LLMClient
 from .llm.factory import LLMSuite
@@ -74,6 +75,13 @@ class ResearchDirector:
         knowledge: KnowledgeBase | None = None,
         gate: HumanGate | None = None,
     ):
+        if task.executor == "local":
+            # tell every agent what this machine actually offers (GPU or not)
+            task = task.model_copy(
+                update={
+                    "environment_notes": f"{task.environment_notes.rstrip()} {local_hardware_note()}"
+                }
+            )
         self.task = task
         self.llms = llm if isinstance(llm, LLMSuite) else LLMSuite.for_single(llm)
         self.console = console or Console()

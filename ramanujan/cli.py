@@ -21,6 +21,38 @@ app = typer.Typer(
 )
 console = Console()
 
+_EXECUTORS = ("local", "docker", "runpod")
+
+
+def _apply_executor_choice(task: TaskSpec, executor: Optional[str]) -> TaskSpec:
+    """Let the user decide where generated code runs: their own machine (CPU or
+    local GPU), a local Docker sandbox, or a RunPod GPU pod. Choosing runpod
+    asks for billing acknowledgement unless the spec already granted it."""
+    if executor:
+        executor = executor.lower()
+        if executor not in _EXECUTORS:
+            console.print(f"[red]Unknown executor '{executor}'. Choose from: {', '.join(_EXECUTORS)}.[/red]")
+            raise typer.Exit(2)
+        if executor != task.executor:
+            updates: dict = {"executor": executor}
+            if executor == "runpod":
+                updates["environment_notes"] = (
+                    f"{task.environment_notes.rstrip()} NOTE: execution target overridden "
+                    "to a remote RunPod GPU pod (NVIDIA GPU, PyTorch + CUDA, torchvision); "
+                    "ignore any earlier CPU-only statements."
+                )
+            task = task.model_copy(update=updates)
+            console.print(f"[dim]Executor overridden to: {executor}[/dim]")
+    if task.executor == "runpod" and not task.runpod.get("confirm_billing"):
+        console.print(
+            "[yellow]RunPod execution creates GPU pods that bill per minute on your "
+            "RunPod account (requires runpodctl configured with an API key).[/yellow]"
+        )
+        if not typer.confirm("Proceed with billed GPU execution?"):
+            raise typer.Exit(1)
+        task = task.model_copy(update={"runpod": {**task.runpod, "confirm_billing": True}})
+    return task
+
 
 @app.command()
 def run(
@@ -43,6 +75,11 @@ def run(
         False, "--interactive", "-i",
         help="Human-in-the-loop: pause to approve/guide plans and review verdicts.",
     ),
+    executor: Optional[str] = typer.Option(
+        None, "--executor", "-x",
+        help="Where generated code runs: local (your CPU / local GPU), docker "
+        "(network-isolated container), or runpod (billed GPU pod). Overrides the task spec.",
+    ),
     runs_root: Path = typer.Option(Path("runs"), help="Directory where run artifacts are stored."),
 ):
     """Run an autonomous research session on a task."""
@@ -51,6 +88,7 @@ def run(
         task = task.model_copy(
             update={"budget": task.budget.model_copy(update={"max_iterations": iterations})}
         )
+    task = _apply_executor_choice(task, executor)
 
     if offline:
         from .offline import DEMO_TASK_SLUG, build_offline_llm
@@ -125,6 +163,11 @@ def ask(
         False, "--interactive", "-i",
         help="Human-in-the-loop: pause to approve/guide plans and review verdicts.",
     ),
+    executor: Optional[str] = typer.Option(
+        None, "--executor", "-x",
+        help="Where generated code runs: local (your CPU / local GPU), docker, or "
+        "runpod (billed GPU pod).",
+    ),
     runs_root: Path = typer.Option(Path("runs"), help="Directory for run artifacts."),
 ):
     """Describe what you want researched in plain English; Ramanujan composes
@@ -152,6 +195,7 @@ def ask(
 
     console.print("[dim]Composing research task...[/dim]")
     task = compose_task(suite.planner, request, files)
+    task = _apply_executor_choice(task, executor)
     spec_path = save_task(task)
     spec_yaml = _yaml.safe_dump(task.model_dump(), sort_keys=False, allow_unicode=True)
     console.print(
