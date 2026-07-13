@@ -1,5 +1,7 @@
 # Ramanujan — an autonomous ML research engineer
 
+[![CI](https://github.com/Abhinoob1501/ramanujan/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhinoob1501/ramanujan/actions/workflows/ci.yml)
+
 A multi-agent system that **runs the scientific method as a loop**. Given a research
 task (dataset + target metric + compute budget), it autonomously:
 
@@ -68,6 +70,25 @@ results speak.
   (CSVs are staged into each experiment's sandbox), and `tracking.wandb: true`
   mirrors every experiment to Weights & Biases (hypothesis and approach as config,
   metrics logged, grouped per run) — degrading to a no-op if wandb isn't configured.
+- **Statistical honesty.** The metrics contract asks for per-fold CV scores; the
+  ledger reports every result with its fold spread ("0.9839 +/- 0.005"), and the
+  critic is instructed to treat sub-1-standard-deviation "improvements" as noise
+  rather than spending budget chasing them.
+- **Per-role model routing.** `RAMANUJAN_MODEL_ENGINEER=...` (and friends) put
+  each agent role on its own model — e.g. a cheap analyst and a strong
+  tool-calling engineer — while one shared pacer keeps the provider-wide rate
+  limit intact. Born from a live observation: routed budget models were fine at
+  judging but flaky at tool use.
+- **Deterministic failure prevention, learned from live runs.** The engineer
+  pre-flights every script's imports and rejects unavailable packages *before*
+  wasting an execution; failure feedback states how many debug attempts remain;
+  a prose-only reply (no tool calls) triggers one corrective retry.
+- **Cost telemetry.** Every run reports its LLM footprint — calls, tokens, and
+  real dollar cost where the provider reports it (OpenRouter does) — in the
+  console, the report, and the event stream.
+- **Self-benchmarking.** `ramanujan bench <tasks...> -n 5` measures the agent
+  system itself: goal-hit rate, mean experiments per run, failure taxonomy —
+  so prompt/model/orchestration changes are evaluated with numbers.
 
 ## Sample session (real output, offline demo)
 
@@ -112,6 +133,9 @@ ramanujan run tasks/churn_csv.yaml
 
 # 5) Inspect any past run in the terminal
 ramanujan show runs/<run_dir>
+
+# 6) Benchmark the agent system itself (works offline too)
+ramanujan bench tasks/demo_breast_cancer.yaml -n 5 --offline
 ```
 
 Each run produces a self-contained directory:
@@ -163,8 +187,9 @@ exponential backoff on 429/5xx, and a hard per-run LLM-call budget.
 
 ## Safety posture
 
-Generated code is contained, not merely trusted:
+Generated code is contained, not merely trusted. Two tiers:
 
+**`executor: local`** (default, zero setup):
 - runs in an isolated per-experiment directory with a hard wall-clock timeout,
 - secrets (`*KEY*`, `*TOKEN*`, `*SECRET*`, ...) are stripped from the child
   environment before execution,
@@ -172,7 +197,11 @@ Generated code is contained, not merely trusted:
 - stale `metrics.json` files are deleted before each run so a crash can never
   inherit a previous success.
 
-This is a guardrail, not a jail — Docker-based isolation is the top roadmap item.
+**`executor: docker`** (real isolation):
+- each experiment runs in a disposable container with `--network=none` (generated
+  code cannot reach the network at all), memory/CPU caps, and only the experiment
+  directory mounted. Build the sandbox image once with
+  `docker build -t ramanujan-sandbox docker/`.
 
 ## Project layout
 
@@ -180,7 +209,8 @@ This is a guardrail, not a jail — Docker-based isolation is the top roadmap it
 ramanujan/
   orchestrator.py      # Research Director: deterministic loop around agentic steps
   task.py              # YAML task spec (dataset, metric, budgets, branches, data files)
-  report.py            # final research report renderer
+  report.py            # final research report renderer (incl. cost telemetry)
+  bench.py             # self-benchmark harness (goal-hit rate, failure taxonomy)
   events.py            # append-only event stream per run (events.jsonl)
   dashboard.py         # zero-dependency live web dashboard over the event stream
   tracking.py          # optional Weights & Biases mirroring
@@ -192,10 +222,11 @@ ramanujan/
     prompts.py         # all system prompts, reviewable in one place
   executors/
     local.py           # sandboxed subprocess executor
+    docker.py          # network-isolated container executor
     runpod.py          # GPU pod lifecycle: create -> exec -> parse -> destroy
   llm/
-    base.py            # provider-agnostic LLM protocol
-    factory.py         # provider auto-detection (Gemini / OpenRouter / Zen / custom)
+    base.py            # provider-agnostic LLM protocol + usage telemetry + pacing
+    factory.py         # provider auto-detection + per-role model routing (LLMSuite)
     gemini.py          # Gemini backend (rate-limited, retrying, budgeted)
     openai_compat.py   # OpenRouter / OpenCode Zen / any OpenAI-style server
     mock.py            # scripted backend for tests + offline mode
@@ -212,19 +243,23 @@ tests/                 # 52 tests incl. full end-to-end research runs
 python -m pytest tests -v
 ```
 
-52 tests cover the ledger, the knowledge base (retrieval ranking, run exclusion),
-the sandbox executor (timeouts, crashes, stale-metrics protection, secret
-stripping), the agent tool loop (error feedback, step limits, JSON self-repair),
-the engineer (debug loop, budget enforcement, path-escape rejection), the
-OpenAI-compatible backend (message/tool-call conversion, retry and degradation
-behavior), provider auto-detection, the event stream (incremental reads, torn
-writes), data-file staging, and full end-to-end research runs — including a
-branched run with budget allocation and cross-run knowledge transfer.
+69 tests cover the ledger (incl. fold-spread reporting), the knowledge base
+(retrieval ranking, run exclusion, code storage, schema migration), the local and
+Docker executors (timeouts, crashes, stale-metrics protection, secret stripping,
+daemon-missing degradation), the agent tool loop (error feedback, step limits,
+JSON self-repair), the engineer (debug loop and budget nudges, import pre-flight,
+prose-only corrective retry, path-escape rejection, reference-code injection),
+the OpenAI-compatible backend (message/tool-call conversion, retry, degradation,
+usage/cost accounting), provider auto-detection and per-role routing, the event
+stream (incremental reads, torn writes), data-file staging, the benchmark
+harness, and full end-to-end research runs — including a branched run with
+budget allocation and cross-run knowledge transfer. CI runs the suite on Linux
+and Windows on every push.
 
 ## Roadmap
 
-- Docker-sandboxed local execution
 - Concurrent branch execution (branches currently run sequentially within a round,
   which respects free-tier LLM rate limits)
-- Retrieval-augmented engineer: recall past *code* (not just insights) for reuse
-- Multi-dataset benchmark mode with aggregate reporting across tasks
+- GPU-fleet mode: reuse one warm RunPod pod across experiments instead of
+  create/destroy per experiment
+- Human-in-the-loop checkpoints (pause for approval between rounds)

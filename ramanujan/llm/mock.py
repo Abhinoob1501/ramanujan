@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .base import ChatMessage, LLMResponse, ToolSpec
+from .base import ChatMessage, LLMResponse, LLMUsage, ToolSpec
 
 
 @dataclass
@@ -25,6 +25,7 @@ class RecordedCall:
 class MockLLM:
     responses: list[LLMResponse] = field(default_factory=list)
     calls: list[RecordedCall] = field(default_factory=list)
+    usage: LLMUsage = field(default_factory=LLMUsage)
 
     def generate(
         self,

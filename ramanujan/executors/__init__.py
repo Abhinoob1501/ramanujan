@@ -12,4 +12,10 @@ def build_executor(task, workdir):
         return RunPodExecutor(
             timeout_seconds=task.budget.experiment_timeout_seconds, **task.runpod
         )
+    if task.executor == "docker":
+        from .docker import DockerExecutor
+
+        return DockerExecutor(
+            timeout_seconds=task.budget.experiment_timeout_seconds, **task.docker
+        )
     return LocalExecutor(timeout_seconds=task.budget.experiment_timeout_seconds)

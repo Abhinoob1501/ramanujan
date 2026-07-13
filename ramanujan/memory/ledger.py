@@ -50,6 +50,22 @@ class ExperimentRecord:
     code_path: str | None = None
 
 
+def _fold_spread(metrics: dict) -> float | None:
+    """Standard deviation across CV folds, if the experiment reported one."""
+    scores = metrics.get("fold_scores")
+    if isinstance(scores, list) and len(scores) >= 2:
+        try:
+            values = [float(v) for v in scores]
+        except (TypeError, ValueError):
+            return None
+        mean = sum(values) / len(values)
+        return (sum((v - mean) ** 2 for v in values) / len(values)) ** 0.5
+    for key in ("fold_std", "std", "metric_std"):
+        if isinstance(metrics.get(key), (int, float)):
+            return float(metrics[key])
+    return None
+
+
 class ExperimentLedger:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
@@ -125,6 +141,9 @@ class ExperimentLedger:
         for rec in records:
             if rec.status == "success":
                 outcome = f"{rec.metric_name}={rec.metric_value:.4f}"
+                spread = _fold_spread(rec.metrics)
+                if spread is not None:
+                    outcome += f" +/- {spread:.4f} (fold std)"
             elif rec.status == "failed":
                 outcome = f"FAILED ({(rec.error_summary or 'unknown error')[:160]})"
             else:

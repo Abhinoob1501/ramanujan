@@ -18,7 +18,9 @@ import os
 from dataclasses import dataclass, field
 
 from ..config import Settings, load_dotenv
-from .base import LLMClient
+from .base import LLMClient, LLMUsage, Pacer
+
+ROLE_NAMES = ("planner", "engineer", "analyst", "critic", "reporter")
 
 PROVIDER_ALIASES = {
     "opencode-zen": "opencode",
@@ -66,7 +68,12 @@ _NO_KEY_HELP = (
 )
 
 
-def build_llm(provider: str | None = None, settings: Settings | None = None) -> LLMClient:
+def build_llm(
+    provider: str | None = None,
+    settings: Settings | None = None,
+    model: str = "",
+    pacer: Pacer | None = None,
+) -> LLMClient:
     load_dotenv()
     settings = settings or Settings.from_env()
     name = (provider or os.environ.get("RAMANUJAN_PROVIDER", "")).strip().lower()
@@ -75,7 +82,7 @@ def build_llm(provider: str | None = None, settings: Settings | None = None) -> 
     if name == "gemini":
         from .gemini import GeminiClient
 
-        return GeminiClient(settings)
+        return GeminiClient(settings, model=model, pacer=pacer)
 
     preset = PRESETS.get(name)
     if preset is None:
@@ -83,7 +90,7 @@ def build_llm(provider: str | None = None, settings: Settings | None = None) -> 
         raise RuntimeError(f"Unknown LLM provider '{name}'. Known providers: {known}.")
 
     base_url = os.environ.get("RAMANUJAN_BASE_URL", "") or preset.base_url
-    model = os.environ.get("RAMANUJAN_MODEL", "") or preset.default_model
+    model = model or os.environ.get("RAMANUJAN_MODEL", "") or preset.default_model
     api_key = next((os.environ[e] for e in preset.key_envs if os.environ.get(e)), "")
     if not api_key:
         raise RuntimeError(
@@ -103,7 +110,62 @@ def build_llm(provider: str | None = None, settings: Settings | None = None) -> 
         model=model,
         extra_headers=preset.extra_headers,
         settings=settings,
+        pacer=pacer,
     )
+
+
+@dataclass
+class LLMSuite:
+    """One LLM client per agent role, so judgment-heavy and tool-heavy roles can
+    run on different models (e.g. a cheap analyst, a strong tool-calling
+    engineer). All clients share one Pacer, so the provider-wide rate limit
+    holds no matter how roles interleave."""
+
+    planner: LLMClient
+    engineer: LLMClient
+    analyst: LLMClient
+    critic: LLMClient
+    reporter: LLMClient
+
+    @classmethod
+    def for_single(cls, llm: LLMClient) -> "LLMSuite":
+        return cls(planner=llm, engineer=llm, analyst=llm, critic=llm, reporter=llm)
+
+    def usage(self) -> LLMUsage:
+        total = LLMUsage()
+        seen: set[int] = set()
+        for client in (self.planner, self.engineer, self.analyst, self.critic, self.reporter):
+            if id(client) in seen:
+                continue
+            seen.add(id(client))
+            client_usage = getattr(client, "usage", None)
+            if client_usage is not None:
+                total = total.merge(client_usage)
+        return total
+
+
+def build_llm_suite(provider: str | None = None, settings: Settings | None = None) -> LLMSuite:
+    """Build per-role clients. RAMANUJAN_MODEL_<ROLE> (e.g.
+    RAMANUJAN_MODEL_ENGINEER) overrides the model for that role; roles without
+    an override share one default client."""
+    load_dotenv()
+    settings = settings or Settings.from_env()
+    pacer = Pacer(settings.min_seconds_between_llm_calls)
+    default_client = build_llm(provider, settings, pacer=pacer)
+
+    clients: dict[str, LLMClient] = {}
+    by_model: dict[str, LLMClient] = {}
+    for role in ROLE_NAMES:
+        override = os.environ.get(f"RAMANUJAN_MODEL_{role.upper()}", "").strip()
+        if not override:
+            clients[role] = default_client
+        elif override in by_model:
+            clients[role] = by_model[override]
+        else:
+            client = build_llm(provider, settings, model=override, pacer=pacer)
+            by_model[override] = client
+            clients[role] = client
+    return LLMSuite(**clients)
 
 
 def _detect_provider() -> str:

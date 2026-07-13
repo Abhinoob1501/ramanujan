@@ -16,7 +16,7 @@ import time
 import requests
 
 from ..config import Settings
-from .base import ChatMessage, LLMBudgetExceeded, LLMResponse, ToolCall, ToolSpec
+from .base import ChatMessage, LLMBudgetExceeded, LLMResponse, LLMUsage, Pacer, ToolCall, ToolSpec
 
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
@@ -31,6 +31,7 @@ class OpenAICompatClient:
         extra_headers: dict | None = None,
         settings: Settings | None = None,
         request_timeout: int = 300,
+        pacer: Pacer | None = None,
     ):
         if not api_key:
             raise RuntimeError("No API key provided for the OpenAI-compatible backend.")
@@ -40,7 +41,8 @@ class OpenAICompatClient:
         self.extra_headers = extra_headers or {}
         self.settings = settings or Settings.from_env()
         self.request_timeout = request_timeout
-        self._last_call_ts = 0.0
+        self._pacer = pacer or Pacer(self.settings.min_seconds_between_llm_calls)
+        self.usage = LLMUsage()
         self.calls_made = 0
 
     # ------------------------------------------------------------------ public
@@ -58,12 +60,16 @@ class OpenAICompatClient:
             raise LLMBudgetExceeded(
                 f"LLM call budget of {self.settings.max_llm_calls_per_run} exhausted."
             )
-        self._throttle()
+        self._pacer.wait()
 
         payload: dict = {
             "model": self.model,
             "messages": self._to_messages(system, messages),
             "temperature": temperature,
+            # OpenRouter returns per-request cost when asked; other providers
+            # ignore unknown fields (and a strict 400 is retried without it,
+            # same degradation path as response_format).
+            "usage": {"include": True},
         }
         if tools:
             payload["tools"] = [
@@ -84,15 +90,18 @@ class OpenAICompatClient:
 
         data = self._call_with_retry(payload)
         self.calls_made += 1
+        self._record_usage(data)
         return self._parse_response(data)
 
     # ---------------------------------------------------------------- internal
 
-    def _throttle(self) -> None:
-        wait = self.settings.min_seconds_between_llm_calls - (time.time() - self._last_call_ts)
-        if wait > 0:
-            time.sleep(wait)
-        self._last_call_ts = time.time()
+    def _record_usage(self, data: dict) -> None:
+        usage = data.get("usage") or {}
+        self.usage.add(
+            prompt_tokens=usage.get("prompt_tokens", 0) or 0,
+            completion_tokens=usage.get("completion_tokens", 0) or 0,
+            cost_usd=float(usage.get("cost", 0) or 0),
+        )
 
     @staticmethod
     def _to_messages(system: str, messages: list[ChatMessage]) -> list[dict]:
@@ -149,9 +158,10 @@ class OpenAICompatClient:
             if response is not None:
                 if response.status_code == 200:
                     return response.json()
-                # some providers reject response_format; degrade gracefully
-                if response.status_code == 400 and "response_format" in payload:
-                    payload = {k: v for k, v in payload.items() if k != "response_format"}
+                # some providers reject optional fields; degrade gracefully
+                droppable = [k for k in ("response_format", "usage") if k in payload]
+                if response.status_code == 400 and droppable:
+                    payload = {k: v for k, v in payload.items() if k not in droppable}
                     continue
                 last_error = f"HTTP {response.status_code}: {response.text[:500]}"
                 if response.status_code not in _RETRYABLE_STATUS:

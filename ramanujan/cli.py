@@ -58,10 +58,10 @@ def run(
             )
         llm = build_offline_llm()
     else:
-        from .llm.factory import build_llm
+        from .llm.factory import build_llm_suite
 
         try:
-            llm = build_llm(provider, Settings.from_env())
+            llm = build_llm_suite(provider, Settings.from_env())
         except RuntimeError as exc:
             console.print(f"[red]Configuration error:[/red] {exc}")
             raise typer.Exit(2)
@@ -95,6 +95,30 @@ def show(run_dir: Path = typer.Argument(..., help="A run directory under runs/."
     report = run_dir / "report.md"
     if report.exists():
         console.print(f"\nFull report: [bold]{report}[/bold]")
+
+
+@app.command()
+def bench(
+    task_files: list[Path] = typer.Argument(..., help="Task YAMLs to benchmark."),
+    repeats: int = typer.Option(2, "--repeats", "-n", help="Runs per task."),
+    offline: bool = typer.Option(False, "--offline", help="Use the scripted demo session."),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider."),
+    runs_root: Path = typer.Option(Path("runs"), help="Directory for run artifacts."),
+):
+    """Benchmark the agent system itself: goal-hit rate, efficiency, failure taxonomy."""
+    from .bench import run_benchmark
+
+    if offline:
+        from .offline import build_offline_llm
+
+        llm_factory = build_offline_llm
+    else:
+        from .llm.factory import build_llm_suite
+
+        def llm_factory():
+            return build_llm_suite(provider, Settings.from_env())
+
+    run_benchmark(task_files, repeats, llm_factory, runs_root, console)
 
 
 @app.command()

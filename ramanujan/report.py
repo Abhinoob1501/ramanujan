@@ -5,12 +5,17 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from .llm.base import LLMUsage
 from .memory.ledger import ExperimentLedger
 from .task import TaskSpec
 
 
 def build_report(
-    task: TaskSpec, ledger: ExperimentLedger, conclusions: str, stop_reason: str
+    task: TaskSpec,
+    ledger: ExperimentLedger,
+    conclusions: str,
+    stop_reason: str,
+    usage: LLMUsage | None = None,
 ) -> str:
     records = ledger.all()
     best = ledger.best(task.metric)
@@ -42,6 +47,14 @@ def build_report(
         )
     else:
         lines.append(f"No experiment produced a valid result. Run stopped: `{stop_reason}`.")
+
+    if usage is not None and usage.calls:
+        cost = f" ≈ **${usage.cost_usd:.4f}**" if usage.cost_usd else ""
+        lines += [
+            "",
+            f"**Research cost:** {usage.calls} LLM calls, "
+            f"{usage.prompt_tokens:,} prompt + {usage.completion_tokens:,} completion tokens{cost}.",
+        ]
 
     lines += ["", "## Leaderboard", "", "| # | Iter | Hypothesis | Status | "
               f"{task.metric.name} | Duration |", "|---|------|------------|--------|--------|----------|"]

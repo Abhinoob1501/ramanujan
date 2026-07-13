@@ -60,9 +60,10 @@ class TaskSpec(BaseModel):
     dataset: str = Field(description="How to obtain/load the data, told verbatim to the engineer.")
     metric: MetricSpec
     budget: BudgetSpec = BudgetSpec()
-    executor: Literal["local", "runpod"] = "local"
+    executor: Literal["local", "docker", "runpod"] = "local"
     environment_notes: str = "Python with scikit-learn, numpy and pandas available. CPU only."
     runpod: dict = Field(default_factory=dict, description="RunPod executor options (gpu_type, image, ...).")
+    docker: dict = Field(default_factory=dict, description="Docker executor options (image, memory, cpus).")
     data_files: list[str] = Field(
         default_factory=list,
         description="Local data files (e.g. CSVs) copied into each experiment's working "

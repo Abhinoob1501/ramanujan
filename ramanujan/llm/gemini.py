@@ -12,14 +12,20 @@ import json
 import time
 
 from ..config import Settings
-from .base import ChatMessage, LLMBudgetExceeded, LLMResponse, ToolCall, ToolSpec
+from .base import ChatMessage, LLMBudgetExceeded, LLMResponse, LLMUsage, Pacer, ToolCall, ToolSpec
 
 _RETRYABLE_MARKERS = ("429", "RESOURCE_EXHAUSTED", "500", "503", "UNAVAILABLE", "DEADLINE")
 
 
 class GeminiClient:
-    def __init__(self, settings: Settings | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        model: str = "",
+        pacer: Pacer | None = None,
+    ):
         self.settings = settings or Settings.from_env()
+        self.model = model or self.settings.gemini_model
         if not self.settings.gemini_api_key:
             raise RuntimeError(
                 "GEMINI_API_KEY is not set. Copy .env.example to .env and add your key "
@@ -31,7 +37,8 @@ class GeminiClient:
 
         self._genai = genai
         self._client = genai.Client(api_key=self.settings.gemini_api_key)
-        self._last_call_ts = 0.0
+        self._pacer = pacer or Pacer(self.settings.min_seconds_between_llm_calls)
+        self.usage = LLMUsage()
         self.calls_made = 0
 
     # ------------------------------------------------------------------ public
@@ -49,21 +56,23 @@ class GeminiClient:
             raise LLMBudgetExceeded(
                 f"LLM call budget of {self.settings.max_llm_calls_per_run} exhausted."
             )
-        self._throttle()
+        self._pacer.wait()
         response = self._call_with_retry(
             contents=self._to_contents(messages),
             config=self._build_config(system, tools, force_json, temperature),
         )
         self.calls_made += 1
+        self._record_usage(response)
         return self._parse_response(response)
 
     # ---------------------------------------------------------------- internal
 
-    def _throttle(self) -> None:
-        wait = self.settings.min_seconds_between_llm_calls - (time.time() - self._last_call_ts)
-        if wait > 0:
-            time.sleep(wait)
-        self._last_call_ts = time.time()
+    def _record_usage(self, response) -> None:
+        meta = getattr(response, "usage_metadata", None)
+        self.usage.add(
+            prompt_tokens=getattr(meta, "prompt_token_count", 0) or 0,
+            completion_tokens=getattr(meta, "candidates_token_count", 0) or 0,
+        )
 
     def _build_config(
         self, system: str, tools: list[ToolSpec] | None, force_json: bool, temperature: float
@@ -121,7 +130,7 @@ class GeminiClient:
         for attempt in range(1, max_attempts + 1):
             try:
                 return self._client.models.generate_content(
-                    model=self.settings.gemini_model, contents=contents, config=config
+                    model=self.model, contents=contents, config=config
                 )
             except Exception as exc:  # SDK raises several error types; match on text
                 message = str(exc)

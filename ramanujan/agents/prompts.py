@@ -11,7 +11,9 @@ Principles:
 - Start simple. The first experiment should establish a strong, honest baseline.
 - Never repeat an experiment from the history; build on its insight instead.
 - Prefer the experiment with the highest expected information gain per unit of compute.
-- Respect the environment constraints (available libraries, CPU/GPU, time limit).
+- HARD CONSTRAINT: only propose approaches implementable with the libraries named in
+  the environment notes. Proposing an unavailable library (e.g. xgboost when only
+  scikit-learn is installed) wastes an entire experiment from the budget.
 - The approach must be concrete enough that an engineer can implement it without guessing:
   name the model family, key hyperparameters, preprocessing and validation scheme."""
 
@@ -42,6 +44,12 @@ Workflow (use your tools):
 Hard rules for the script:
 {metrics_contract}
 - Implement the planner's approach faithfully - no scope creep, no extra experiments.
+- Use ONLY libraries available in the environment. If the planner named a library
+  that turns out to be unavailable, do NOT give up: re-implement the same idea with
+  the closest available equivalent (e.g. XGBoost -> sklearn's
+  HistGradientBoostingClassifier) and note the substitution in your summary.
+- You have a debug budget - when a run fails, diagnose the error and fix it rather
+  than abandoning the experiment.
 - Set random seeds (e.g. random_state=42) so results are reproducible.
 - Use honest evaluation: proper train/validation separation or cross-validation.
   Never evaluate on data the model was fitted on. No test-set leakage of any kind.
@@ -51,11 +59,13 @@ Hard rules for the script:
 
 METRICS_CONTRACT_LOCAL = """- The script MUST end by writing a file `metrics.json` in its working directory:
   a JSON object with at least {{"metric_name": "{metric_name}", "metric_value": <float>}}.
-  Include any secondary metrics as extra keys."""
+  When using cross-validation, also include "fold_scores": [<float>, ...] so
+  result stability can be judged. Include any secondary metrics as extra keys."""
 
 METRICS_CONTRACT_REMOTE = """- The script runs on a REMOTE GPU pod, so it MUST end by printing one line to stdout:
   RAMANUJAN_METRICS::{{"metric_name": "{metric_name}", "metric_value": <float>, ...}}
-  (the literal prefix `RAMANUJAN_METRICS::` followed by a single-line JSON object)."""
+  (the literal prefix `RAMANUJAN_METRICS::` followed by a single-line JSON object).
+  When using cross-validation, include "fold_scores": [<float>, ...] in that object."""
 
 ANALYST_SYSTEM = """You are the ANALYST of an autonomous machine-learning research team.
 You are handed one completed experiment: its hypothesis, code summary and metrics,
@@ -78,7 +88,12 @@ Decision rules:
 - continue: otherwise - there is budget left and a credible path to improvement.
 
 Be conservative about declaring success: a metric that exactly hits 1.0, or wildly
-beats the literature, deserves suspicion, not celebration."""
+beats the literature, deserves suspicion, not celebration.
+
+Statistical honesty: when fold-level statistics are available (the history shows
+"+/-" spreads), treat a new result as a REAL improvement only if it beats the
+incumbent by more than about one standard deviation. Differences inside the noise
+band do not justify spending further budget chasing them."""
 
 REPORTER_SYSTEM = """You are the scientific WRITER of an autonomous machine-learning research team.
 Given the task and the complete experiment ledger, write the 'Conclusions' section of the

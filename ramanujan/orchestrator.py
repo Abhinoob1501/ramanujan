@@ -45,6 +45,7 @@ from .agents.roles import (
 from .events import EventLog
 from .executors import build_executor
 from .llm.base import LLMBudgetExceeded, LLMClient
+from .llm.factory import LLMSuite
 from .memory.knowledge import KnowledgeBase, format_for_prompt
 from .memory.ledger import ExperimentLedger, ExperimentRecord
 from .report import build_report
@@ -65,13 +66,13 @@ class ResearchDirector:
     def __init__(
         self,
         task: TaskSpec,
-        llm: LLMClient,
+        llm: LLMClient | LLMSuite,
         runs_root: str | Path = "runs",
         console: Console | None = None,
         knowledge: KnowledgeBase | None = None,
     ):
         self.task = task
-        self.llm = llm
+        self.llms = llm if isinstance(llm, LLMSuite) else LLMSuite.for_single(llm)
         self.console = console or Console()
         stamp = time.strftime("%Y%m%d_%H%M%S")
         # uuid suffix: run ids must be unique even for runs started in the same
@@ -86,6 +87,7 @@ class ResearchDirector:
         self.tracker = ExperimentTracker(task, self.run_id, console=self.console)
         self._experiments_used = 0
         self._current_iteration: int | None = None
+        self._reference_code = ""
 
     # ------------------------------------------------------------------ public
 
@@ -121,7 +123,7 @@ class ResearchDirector:
                         analysis = analysis_of_branch
 
                 verdict = run_critic(
-                    self.llm, task, self.ledger.summary_markdown(metric),
+                    self.llms.critic, task, self.ledger.summary_markdown(metric),
                     analysis, iteration, rounds_left,
                     last_experiment_failed=not round_had_success,
                 )
@@ -169,7 +171,7 @@ class ResearchDirector:
         summary = self.ledger.summary_markdown(metric)
 
         if k == 1:
-            plan = run_planner(self.llm, task, summary, iteration, rounds_left, prior_knowledge)
+            plan = run_planner(self.llms.planner, task, summary, iteration, rounds_left, prior_knowledge)
             self._panel("Planner", f"[bold]Hypothesis:[/bold] {plan.hypothesis}\n"
                                    f"[bold]Approach:[/bold] {plan.approach}", "cyan")
             self.events.emit(
@@ -180,7 +182,7 @@ class ResearchDirector:
             return [plan]
 
         candidates = run_planner_batch(
-            self.llm, task, summary, iteration, rounds_left, k, prior_knowledge
+            self.llms.planner, task, summary, iteration, rounds_left, k, prior_knowledge
         )
         for i, plan in enumerate(candidates):
             self._panel(f"Planner - candidate {i}", f"[bold]Hypothesis:[/bold] {plan.hypothesis}\n"
@@ -193,7 +195,7 @@ class ResearchDirector:
 
         experiments_left = task.budget.experiment_cap - self._experiments_used
         allocation = run_allocator(
-            self.llm, task, summary, candidates,
+            self.llms.critic, task, summary, candidates,
             max_selectable=min(k, experiments_left),
             experiments_left_total=experiments_left,
         )
@@ -225,9 +227,11 @@ class ResearchDirector:
         workdir = self.run_dir / f"iter_{iteration:02d}{suffix}"
         staged = task.stage_data_files(workdir) if task.data_files else []
         engineer = EngineerAgent(
-            self.llm, task, self.executor, workdir, on_event=self._on_agent_event
+            self.llms.engineer, task, self.executor, workdir, on_event=self._on_agent_event
         )
-        outcome = engineer.implement(plan, staged_files=staged)
+        outcome = engineer.implement(
+            plan, staged_files=staged, reference_code=self._reference_code
+        )
 
         analysis: Analysis | None = None
         if outcome.success:
@@ -253,7 +257,7 @@ class ResearchDirector:
                          "duration_seconds": outcome.duration_seconds},
             )
             analysis = run_analyst(
-                self.llm, task, self.ledger.summary_markdown(metric),
+                self.llms.analyst, task, self.ledger.summary_markdown(metric),
                 plan, outcome.summary, outcome.metrics,
             )
             self.ledger.record_insight(experiment_id, analysis.insight)
@@ -293,9 +297,14 @@ class ResearchDirector:
         query = f"{self.task.name}\n{self.task.description}\n{self.task.dataset}"
         items = self.knowledge.retrieve(query, top_k=5, exclude_run=self.run_id)
         if items:
+            # best sufficiently-similar past solution becomes the engineer's reference
+            with_code = [i for i in items if i.code and i.similarity >= 0.2]
+            if with_code:
+                self._reference_code = with_code[0].code
             self._panel(
                 "Knowledge base",
-                f"Recalled [bold]{len(items)}[/bold] insight(s) from past runs.",
+                f"Recalled [bold]{len(items)}[/bold] insight(s) from past runs"
+                + (" (incl. a reference solution for the engineer)." if with_code else "."),
                 "blue",
             )
             self.events.emit(
@@ -304,13 +313,17 @@ class ResearchDirector:
                     {"task": item.task_name, "insight": item.insight,
                      "similarity": round(item.similarity, 3)}
                     for item in items
-                ]},
+                ], "reference_code": bool(self._reference_code)},
             )
         return format_for_prompt(items)
 
     def _store_new_knowledge(self) -> None:
+        best = self.ledger.best(self.task.metric)
         for rec in self.ledger.all():
             if rec.status == "success" and rec.insight:
+                code = ""
+                if best and rec.id == best.id and rec.code_path and Path(rec.code_path).exists():
+                    code = Path(rec.code_path).read_text(encoding="utf-8")
                 self.knowledge.add_insight(
                     run_id=self.run_id,
                     task_name=self.task.name,
@@ -319,6 +332,7 @@ class ResearchDirector:
                     insight=rec.insight,
                     metric_name=rec.metric_name,
                     metric_value=rec.metric_value,
+                    code=code,
                 )
 
     # ---------------------------------------------------------------- internal
@@ -326,13 +340,20 @@ class ResearchDirector:
     def _write_report(self, stop_reason: str) -> Path:
         summary = self.ledger.summary_markdown(self.task.metric)
         try:
-            conclusions = write_conclusions(self.llm, self.task, summary)
+            conclusions = write_conclusions(self.llms.reporter, self.task, summary)
         except Exception as exc:  # a dead LLM must not lose the run's artifacts
             conclusions = f"(Conclusions unavailable: {exc})"
-        report = build_report(self.task, self.ledger, conclusions, stop_reason)
+        usage = self.llms.usage()
+        report = build_report(self.task, self.ledger, conclusions, stop_reason, usage=usage)
         path = self.run_dir / "report.md"
         path.write_text(report, encoding="utf-8")
         self.events.emit("report", "report_written", payload={"path": str(path)})
+        self.events.emit(
+            "finish", "llm_usage",
+            payload={"calls": usage.calls, "prompt_tokens": usage.prompt_tokens,
+                     "completion_tokens": usage.completion_tokens,
+                     "cost_usd": round(usage.cost_usd, 6)},
+        )
         return path
 
     def _on_agent_event(self, agent: str, kind: str, detail: str) -> None:
@@ -381,9 +402,13 @@ class ResearchDirector:
             )
         else:
             line = "[red]No experiment produced a valid result.[/red]"
+        usage = self.llms.usage()
+        cost = f" (~${usage.cost_usd:.4f})" if usage.cost_usd else ""
         self._panel(
             "Run complete",
-            f"{line}\nStop reason: {stop_reason}\nReport: {report_path}\n"
+            f"{line}\nStop reason: {stop_reason}\n"
+            f"LLM usage: {usage.calls} calls, {usage.prompt_tokens + usage.completion_tokens} tokens{cost}\n"
+            f"Report: {report_path}\n"
             f"Dashboard: ramanujan dashboard {self.run_dir}",
             "bold white",
         )

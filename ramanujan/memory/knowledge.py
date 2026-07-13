@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS insights (
     metric_name TEXT,
     metric_value REAL,
     embedding TEXT NOT NULL,
+    code TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -100,6 +101,7 @@ class KnowledgeItem:
     metric_name: str | None
     metric_value: float | None
     similarity: float
+    code: str = ""
 
 
 class KnowledgeBase:
@@ -110,7 +112,14 @@ class KnowledgeBase:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Bring databases created by older versions up to the current schema."""
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(insights)")}
+        if "code" not in columns:
+            self._conn.execute("ALTER TABLE insights ADD COLUMN code TEXT NOT NULL DEFAULT ''")
 
     def add_insight(
         self,
@@ -122,15 +131,16 @@ class KnowledgeBase:
         insight: str,
         metric_name: str | None = None,
         metric_value: float | None = None,
+        code: str = "",
     ) -> None:
         text = f"{task_name}\n{hypothesis}\n{approach}\n{insight}"
         embedding = self.embedder.embed(text)
         self._conn.execute(
             """INSERT INTO insights
-               (run_id, task_name, hypothesis, approach, insight, metric_name, metric_value, embedding)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (run_id, task_name, hypothesis, approach, insight, metric_name, metric_value, embedding, code)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (run_id, task_name, hypothesis, approach, insight, metric_name, metric_value,
-             json.dumps(embedding)),
+             json.dumps(embedding), code[:6000]),
         )
         self._conn.commit()
 
@@ -153,6 +163,7 @@ class KnowledgeBase:
                     metric_name=row["metric_name"],
                     metric_value=row["metric_value"],
                     similarity=similarity,
+                    code=row["code"],
                 )
             )
         items.sort(key=lambda item: item.similarity, reverse=True)

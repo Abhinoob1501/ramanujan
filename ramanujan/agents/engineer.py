@@ -7,10 +7,13 @@ debug budget runs out.
 
 from __future__ import annotations
 
+import ast
+import importlib.util
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..executors.base import ExecutionResult, Executor
+from ..executors.local import LocalExecutor
 from ..llm.base import LLMClient, ToolSpec
 from ..task import TaskSpec
 from . import prompts
@@ -101,11 +104,24 @@ class EngineerAgent:
 
     # ------------------------------------------------------------------ public
 
-    def implement(self, plan: ExperimentPlan, staged_files: list[str] | None = None) -> EngineerOutcome:
+    def implement(
+        self,
+        plan: ExperimentPlan,
+        staged_files: list[str] | None = None,
+        reference_code: str = "",
+    ) -> EngineerOutcome:
         files_block = (
             "\nData files already present in your working directory (read them by "
             f"bare filename): {', '.join(staged_files)}\n"
             if staged_files
+            else ""
+        )
+        reference_block = (
+            "\nREFERENCE: the winning solution from a similar past research task is "
+            "below. Adapt what transfers (structure, validation protocol) to THIS "
+            "experiment's plan - do not copy it blindly.\n```python\n"
+            f"{reference_code}\n```\n"
+            if reference_code
             else ""
         )
         prompt = (
@@ -113,7 +129,7 @@ class EngineerAgent:
             f"Hypothesis: {plan.hypothesis}\n"
             f"Approach: {plan.approach}\n"
             f"Rationale: {plan.rationale}\n\n"
-            f"Dataset: {self.task.dataset}\n{files_block}"
+            f"Dataset: {self.task.dataset}\n{files_block}{reference_block}"
             f"Report the metric '{self.task.metric.name}'."
         )
         result = self._agent.run(prompt)
@@ -166,8 +182,23 @@ class EngineerAgent:
                 f"({self.task.budget.max_debug_attempts} retries). Stop and reply with a "
                 "plain-text summary of what went wrong."
             )
-        self.run_attempts += 1
         filename = str(args.get("filename") or "train.py")
+
+        # Pre-flight: reject scripts importing unavailable packages BEFORE
+        # spending an execution (and a debug attempt) on a guaranteed
+        # ModuleNotFoundError. Only meaningful locally - a remote pod's
+        # environment differs from this machine's.
+        if isinstance(self.executor, LocalExecutor):
+            missing = self._missing_imports(filename)
+            if missing:
+                return (
+                    f"PRE-FLIGHT REJECTED (script was NOT run, no debug attempt spent): "
+                    f"these imported packages are not installed: {', '.join(missing)}. "
+                    "Rewrite train.py using available equivalents (e.g. xgboost -> "
+                    "sklearn.ensemble.HistGradientBoostingClassifier) and run again."
+                )
+
+        self.run_attempts += 1
         result = self.executor.run(self.workdir, script_name=filename)
         if result.ok and self._metrics_valid(result.metrics):
             self.last_success = result
@@ -184,9 +215,43 @@ class EngineerAgent:
             self.last_failure = result
         else:
             self.last_failure = result
-        return result.to_feedback()
+        feedback = result.to_feedback()
+        if not result.ok:
+            remaining = self.task.budget.max_debug_attempts - self.run_attempts + 1
+            if remaining > 0:
+                feedback += (
+                    f"\n\nYou have {remaining} debug attempt(s) remaining. Diagnose the "
+                    "error above, fix train.py with write_file, and call run_script again."
+                )
+        return feedback
 
     # ---------------------------------------------------------------- internal
+
+    def _missing_imports(self, filename: str) -> list[str]:
+        """Top-level imported packages of the script that cannot be resolved
+        in this interpreter. Syntax errors are ignored here - execution will
+        surface them with a proper traceback."""
+        script = self.workdir / filename
+        if not script.exists():
+            return []
+        try:
+            tree = ast.parse(script.read_text(encoding="utf-8"))
+        except SyntaxError:
+            return []
+        modules: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                modules.add(node.module.split(".")[0])
+        missing = []
+        for module in sorted(modules):
+            try:
+                if importlib.util.find_spec(module) is None:
+                    missing.append(module)
+            except (ImportError, ValueError):
+                pass  # unresolvable oddity; let real execution decide
+        return missing
 
     def _metrics_valid(self, metrics: dict) -> bool:
         return (
