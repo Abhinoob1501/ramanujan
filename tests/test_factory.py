@@ -14,6 +14,8 @@ ALL_KEY_ENVS = [
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
+    # a developer's real .env must not leak keys back into these tests
+    monkeypatch.setattr("ramanujan.llm.factory.load_dotenv", lambda *a, **k: None)
     for env in ALL_KEY_ENVS:
         monkeypatch.delenv(env, raising=False)
 

@@ -118,6 +118,17 @@ class EngineerAgent:
         )
         result = self._agent.run(prompt)
 
+        # Weaker models (e.g. behind openrouter/auto) sometimes answer with
+        # prose instead of using their tools. If the script was never executed,
+        # give exactly one sterner retry before declaring the experiment failed.
+        if self.last_success is None and self.run_attempts == 0 and not result.exhausted:
+            result = self._agent.run(
+                prompt
+                + "\n\nIMPORTANT: Your previous reply used no tools, so nothing was "
+                "built. You MUST call write_file to create train.py and then call "
+                "run_script to execute it. Reply with text only AFTER run_script succeeds."
+            )
+
         if self.last_success is not None:
             return EngineerOutcome(
                 success=True,

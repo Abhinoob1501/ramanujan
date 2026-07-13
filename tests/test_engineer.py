@@ -79,11 +79,43 @@ def test_debug_budget_is_enforced(task, tmp_path):
     assert any("debug budget exhausted" in f for f in feedback)
 
 
+def test_prose_only_reply_gets_one_corrective_retry(task, tmp_path):
+    # first conversation: model ignores its tools entirely; retry must recover
+    llm = MockLLM(
+        responses=[
+            LLMResponse(text="Here is the code you asked for: ```python ...```"),
+            LLMResponse(tool_calls=[ToolCall("write_file", {"filename": "train.py", "content": GOOD_SCRIPT})]),
+            LLMResponse(tool_calls=[ToolCall("run_script", {})]),
+            LLMResponse(text="built it on the second attempt"),
+        ]
+    )
+    outcome = make_engineer(llm, task, tmp_path).implement(PLAN)
+    assert outcome.success
+    retry_prompt = llm.calls[1].messages[0].content
+    assert "used no tools" in retry_prompt
+
+
+def test_no_retry_after_script_actually_ran(task, tmp_path):
+    # the script ran (and failed); prose-only retry must NOT kick in
+    llm = MockLLM(
+        responses=[
+            LLMResponse(tool_calls=[ToolCall("write_file", {"filename": "train.py", "content": BAD_SCRIPT})]),
+            LLMResponse(tool_calls=[ToolCall("run_script", {})]),
+            LLMResponse(text="could not fix it"),
+        ]
+    )
+    outcome = make_engineer(llm, task, tmp_path).implement(PLAN)
+    assert not outcome.success
+    assert llm.responses == []  # exactly three responses consumed, no retry conversation
+
+
 def test_path_escape_is_blocked(task, tmp_path):
     llm = MockLLM(
         responses=[
             LLMResponse(tool_calls=[ToolCall("write_file", {"filename": "../../evil.py", "content": "x = 1"})]),
             LLMResponse(text="done"),
+            # script never ran -> the corrective retry fires one more conversation
+            LLMResponse(text="still done"),
         ]
     )
     outcome = make_engineer(llm, task, tmp_path).implement(PLAN)
