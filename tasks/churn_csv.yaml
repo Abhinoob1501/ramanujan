@@ -1,0 +1,30 @@
+# Example of a bring-your-own-dataset task: the CSVs listed in data_files are
+# copied into each experiment's working directory before the engineer runs,
+# so generated scripts read them by bare filename.
+# Also demonstrates parallel branches and (optional) W&B tracking.
+name: customer-churn-csv
+description: >
+  Predict customer churn from a small tabular CSV. Maximize cross-validated
+  ROC-AUC with sound methodology.
+dataset: |
+  File churn_sample.csv (already in the working directory). 400 rows.
+  Columns: age, tenure_months, monthly_spend, support_tickets,
+  is_premium (0/1), churned (0/1 target). Load with pandas.
+data_files:
+  - tasks/data/churn_sample.csv
+metric:
+  name: roc_auc
+  goal: 0.80
+  direction: maximize
+budget:
+  max_iterations: 3
+  parallel_branches: 2      # planner proposes 2 hypotheses per round;
+  max_experiments: 5        # the critic allocates this total budget across them
+  max_debug_attempts: 3
+  experiment_timeout_seconds: 300
+executor: local
+environment_notes: >
+  Python with scikit-learn, numpy and pandas available. CPU only.
+tracking:
+  wandb: false              # set true (plus WANDB_API_KEY) to mirror experiments to W&B
+  wandb_project: ramanujan-churn

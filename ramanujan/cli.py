@@ -97,5 +97,16 @@ def show(run_dir: Path = typer.Argument(..., help="A run directory under runs/."
         console.print(f"\nFull report: [bold]{report}[/bold]")
 
 
+@app.command()
+def dashboard(
+    run_dir: Path = typer.Argument(..., help="A run directory under runs/ (live or finished)."),
+    port: int = typer.Option(8787, "--port", help="Port to serve on."),
+):
+    """Serve a live web dashboard streaming the run's reasoning and results."""
+    from .dashboard import serve_dashboard
+
+    serve_dashboard(run_dir, port=port)
+
+
 if __name__ == "__main__":
     app()

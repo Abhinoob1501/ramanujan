@@ -101,13 +101,19 @@ class EngineerAgent:
 
     # ------------------------------------------------------------------ public
 
-    def implement(self, plan: ExperimentPlan) -> EngineerOutcome:
+    def implement(self, plan: ExperimentPlan, staged_files: list[str] | None = None) -> EngineerOutcome:
+        files_block = (
+            "\nData files already present in your working directory (read them by "
+            f"bare filename): {', '.join(staged_files)}\n"
+            if staged_files
+            else ""
+        )
         prompt = (
             f"Implement this experiment.\n\n"
             f"Hypothesis: {plan.hypothesis}\n"
             f"Approach: {plan.approach}\n"
             f"Rationale: {plan.rationale}\n\n"
-            f"Dataset: {self.task.dataset}\n"
+            f"Dataset: {self.task.dataset}\n{files_block}"
             f"Report the metric '{self.task.metric.name}'."
         )
         result = self._agent.run(prompt)

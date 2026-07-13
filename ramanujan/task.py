@@ -31,6 +31,27 @@ class BudgetSpec(BaseModel):
     max_iterations: int = 5
     max_debug_attempts: int = 3
     experiment_timeout_seconds: int = 600
+    parallel_branches: int = Field(
+        default=1,
+        ge=1,
+        le=5,
+        description="Hypotheses the planner proposes per round; when >1 the critic "
+        "allocates the experiment budget across them.",
+    )
+    max_experiments: int | None = Field(
+        default=None,
+        description="Total experiment cap across all rounds; defaults to "
+        "max_iterations * parallel_branches.",
+    )
+
+    @property
+    def experiment_cap(self) -> int:
+        return self.max_experiments or self.max_iterations * self.parallel_branches
+
+
+class TrackingSpec(BaseModel):
+    wandb: bool = False
+    wandb_project: str = "ramanujan"
 
 
 class TaskSpec(BaseModel):
@@ -42,6 +63,28 @@ class TaskSpec(BaseModel):
     executor: Literal["local", "runpod"] = "local"
     environment_notes: str = "Python with scikit-learn, numpy and pandas available. CPU only."
     runpod: dict = Field(default_factory=dict, description="RunPod executor options (gpu_type, image, ...).")
+    data_files: list[str] = Field(
+        default_factory=list,
+        description="Local data files (e.g. CSVs) copied into each experiment's working "
+        "directory, so generated scripts can read them by bare filename.",
+    )
+    tracking: TrackingSpec = TrackingSpec()
+
+    def stage_data_files(self, dest: str | Path) -> list[str]:
+        """Copy the task's data files into an experiment working directory.
+        Returns the staged file names; raises if a file is missing."""
+        import shutil
+
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        staged = []
+        for entry in self.data_files:
+            source = Path(entry)
+            if not source.exists():
+                raise FileNotFoundError(f"Task data file not found: {source}")
+            shutil.copy2(source, dest / source.name)
+            staged.append(source.name)
+        return staged
 
     @field_validator("name")
     @classmethod

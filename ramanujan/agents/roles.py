@@ -49,17 +49,95 @@ def _task_block(task: TaskSpec) -> str:
     )
 
 
+class ExperimentPlanBatch(BaseModel):
+    plans: list[ExperimentPlan] = Field(min_length=1)
+
+
+class BudgetAllocation(BaseModel):
+    selected_indices: list[int] = Field(
+        min_length=1, description="0-based indices of the candidate plans to fund, in priority order."
+    )
+    reasoning: str
+
+
+def _planning_context(
+    task: TaskSpec, ledger_summary: str, iteration: int, iterations_left: int, prior_knowledge: str
+) -> str:
+    knowledge_block = f"{prior_knowledge}\n\n" if prior_knowledge else ""
+    return (
+        f"{_task_block(task)}\n\n"
+        f"{knowledge_block}"
+        f"EXPERIMENT HISTORY:\n{ledger_summary}\n\n"
+        f"You are planning round {iteration}. After this one, {iterations_left} "
+        f"round(s) of budget remain.\n"
+    )
+
+
 def run_planner(
-    llm: LLMClient, task: TaskSpec, ledger_summary: str, iteration: int, iterations_left: int
+    llm: LLMClient,
+    task: TaskSpec,
+    ledger_summary: str,
+    iteration: int,
+    iterations_left: int,
+    prior_knowledge: str = "",
 ) -> ExperimentPlan:
+    prompt = (
+        _planning_context(task, ledger_summary, iteration, iterations_left, prior_knowledge)
+        + "Propose the single most informative next experiment."
+    )
+    return ask_json(llm, system=prompts.PLANNER_SYSTEM, prompt=prompt, model_cls=ExperimentPlan)
+
+
+def run_planner_batch(
+    llm: LLMClient,
+    task: TaskSpec,
+    ledger_summary: str,
+    iteration: int,
+    iterations_left: int,
+    k: int,
+    prior_knowledge: str = "",
+) -> list[ExperimentPlan]:
+    prompt = (
+        _planning_context(task, ledger_summary, iteration, iterations_left, prior_knowledge)
+        + f"Propose exactly {k} CANDIDATE experiments that test genuinely different "
+        "hypotheses (no near-duplicates). A budget authority will decide which of "
+        "them are actually run."
+    )
+    batch = ask_json(llm, system=prompts.PLANNER_SYSTEM, prompt=prompt, model_cls=ExperimentPlanBatch)
+    return batch.plans[:k]
+
+
+def run_allocator(
+    llm: LLMClient,
+    task: TaskSpec,
+    ledger_summary: str,
+    plans: list[ExperimentPlan],
+    max_selectable: int,
+    experiments_left_total: int,
+) -> BudgetAllocation:
+    candidates = "\n".join(
+        f"[{i}] Hypothesis: {p.hypothesis}\n    Approach: {p.approach}"
+        for i, p in enumerate(plans)
+    )
     prompt = (
         f"{_task_block(task)}\n\n"
         f"EXPERIMENT HISTORY:\n{ledger_summary}\n\n"
-        f"You are planning iteration {iteration}. After this one, {iterations_left} "
-        f"iteration(s) of budget remain.\n"
-        "Propose the single most informative next experiment."
+        f"CANDIDATE EXPERIMENTS FOR THIS ROUND:\n{candidates}\n\n"
+        f"You may fund at most {max_selectable} of them this round. "
+        f"{experiments_left_total} experiment(s) remain in the total budget.\n"
+        "Select the candidates to run, in priority order."
     )
-    return ask_json(llm, system=prompts.PLANNER_SYSTEM, prompt=prompt, model_cls=ExperimentPlan)
+    allocation = ask_json(
+        llm, system=prompts.ALLOCATOR_SYSTEM, prompt=prompt, model_cls=BudgetAllocation
+    )
+    # sanitize: keep valid, unique indices, clamp count; guarantee at least one
+    seen: set[int] = set()
+    valid = [
+        i for i in allocation.selected_indices
+        if 0 <= i < len(plans) and not (i in seen or seen.add(i))
+    ][:max_selectable]
+    allocation.selected_indices = valid or [0]
+    return allocation
 
 
 def run_analyst(

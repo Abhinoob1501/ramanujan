@@ -1,0 +1,195 @@
+"""Live research dashboard.
+
+`ramanujan dashboard <run_dir>` serves a single-page view of a run's event
+stream (events.jsonl). Works on finished runs and LIVE ones: the page polls
+/api/events incrementally, and since the orchestrator appends events from its
+own process, you can watch planner hypotheses, engineer tool calls, metrics
+and critic verdicts arrive in real time.
+
+Deliberately dependency-free: stdlib http.server + a self-contained HTML page.
+"""
+
+from __future__ import annotations
+
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from .events import read_events_since
+
+_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ramanujan - live research</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#e6edf3; --dim:#8b949e;
+          --cyan:#58a6ff; --green:#3fb950; --red:#f85149; --amber:#d29922; --purple:#bc8cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
+  header { position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--border);
+           padding:14px 22px; display:flex; gap:18px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  .badge { border:1px solid var(--border); border-radius:12px; padding:1px 10px; color:var(--dim); }
+  .badge.live { color:var(--green); border-color:var(--green); }
+  .badge.done { color:var(--cyan); border-color:var(--cyan); }
+  #best { color:var(--green); font-weight:bold; }
+  main { max-width:940px; margin:0 auto; padding:18px 22px 60px; }
+  .round { color:var(--dim); margin:26px 0 10px; border-bottom:1px dashed var(--border);
+           padding-bottom:4px; font-weight:bold; }
+  .card { background:var(--card); border:1px solid var(--border); border-left:3px solid var(--dim);
+          border-radius:6px; padding:10px 14px; margin:8px 0; overflow-wrap:anywhere; }
+  .card .who { font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--dim); }
+  .plan { border-left-color:var(--cyan); }
+  .ok { border-left-color:var(--green); }
+  .fail { border-left-color:var(--red); }
+  .judge { border-left-color:var(--amber); }
+  .analysis { border-left-color:var(--purple); }
+  .toollog { color:var(--dim); font-size:12px; margin:2px 0 2px 12px; white-space:pre-wrap; }
+  .metric { font-size:18px; color:var(--green); font-weight:bold; }
+  .dim { color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ramanujan</h1>
+  <span id="task" class="dim">waiting for events...</span>
+  <span id="status" class="badge">connecting</span>
+  <span id="best"></span>
+</header>
+<main id="feed"></main>
+<script>
+let last = 0, direction = "maximize", metricName = "", best = null, finished = false;
+const feed = document.getElementById("feed");
+
+function card(cls, who, html) {
+  const el = document.createElement("div");
+  el.className = "card " + cls;
+  el.innerHTML = `<div class="who">${who}</div>${html}`;
+  feed.appendChild(el);
+}
+function esc(s) {
+  return String(s ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+}
+function render(ev) {
+  const p = ev.payload || {};
+  switch (ev.kind) {
+    case "run_started":
+      direction = p.direction; metricName = p.metric_name;
+      document.getElementById("task").textContent =
+        `${p.task} - ${p.metric_name} goal ${p.goal} - ${p.max_iterations} rounds x ${p.parallel_branches} branch(es)`;
+      break;
+    case "prior_knowledge_retrieved":
+      card("plan", "knowledge base",
+        (p.insights || []).map(i => `<div class="dim">(${esc(i.task)}) ${esc(i.insight)}</div>`).join(""));
+      break;
+    case "round_started": {
+      const el = document.createElement("div");
+      el.className = "round"; el.textContent = `ROUND ${ev.iteration}`;
+      feed.appendChild(el); break;
+    }
+    case "plan_proposed":
+      card("plan", `planner - hypothesis ${p.branch}`,
+        `<b>${esc(p.hypothesis)}</b><div class="dim">${esc(p.approach)}</div>`);
+      break;
+    case "budget_allocated":
+      card("judge", "budget allocator",
+        `funding candidates <b>[${(p.selected || []).join(", ")}]</b><div class="dim">${esc(p.reasoning)}</div>`);
+      break;
+    case "agent_tool_call": {
+      const el = document.createElement("div");
+      el.className = "toollog"; el.textContent = `${ev.agent} -> ${p.detail}`;
+      feed.appendChild(el); break;
+    }
+    case "experiment_result":
+      if (p.status === "success") {
+        const v = p.metric_value;
+        if (best === null || (direction === "maximize" ? v > best : v < best)) best = v;
+        document.getElementById("best").textContent = `best ${metricName}: ${Number(best).toFixed(4)}`;
+        card("ok", `experiment ${p.experiment_id} - success`,
+          `<span class="metric">${metricName} = ${Number(v).toFixed(4)}</span>` +
+          `<span class="dim"> in ${Number(p.duration_seconds).toFixed(1)}s</span>`);
+      } else {
+        card("fail", `experiment ${p.experiment_id} - failed`, `<span class="dim">${esc(p.error)}</span>`);
+      }
+      break;
+    case "analysis":
+      card("analysis", "analyst", `${esc(p.insight)}` +
+        (p.suspicion ? `<div style="color:var(--amber)">suspicion: ${esc(p.suspicion)}</div>` : ""));
+      break;
+    case "verdict":
+      card("judge", "critic", `<b>${esc(p.decision)}</b><div class="dim">${esc(p.reasoning)}</div>`);
+      break;
+    case "run_finished":
+      finished = true;
+      card(p.goal_met ? "ok" : "fail", "run finished",
+        `stop reason: <b>${esc(p.stop_reason)}</b>` +
+        (p.best_metric_value !== null ? ` - best ${metricName} = ${Number(p.best_metric_value).toFixed(4)}` : "") +
+        `<div class="dim">${esc(p.report)}</div>`);
+      break;
+  }
+}
+async function poll() {
+  try {
+    const res = await fetch(`/api/events?since=${last}`);
+    const data = await res.json();
+    const atBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 80;
+    for (const ev of data.events) { render(ev); last = ev.seq; }
+    document.getElementById("status").textContent = finished ? "finished" : "live";
+    document.getElementById("status").className = "badge " + (finished ? "done" : "live");
+    if (data.events.length && atBottom) window.scrollTo(0, document.body.scrollHeight);
+  } catch (e) {
+    document.getElementById("status").textContent = "disconnected";
+    document.getElementById("status").className = "badge";
+  }
+  setTimeout(poll, finished ? 5000 : 1500);
+}
+poll();
+</script>
+</body>
+</html>
+"""
+
+
+def make_handler(events_path: Path):
+    class DashboardHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 (stdlib API)
+            parsed = urlparse(self.path)
+            if parsed.path == "/":
+                self._send(200, "text/html; charset=utf-8", _PAGE.encode("utf-8"))
+            elif parsed.path == "/api/events":
+                since = int(parse_qs(parsed.query).get("since", ["0"])[0])
+                events = read_events_since(events_path, since)
+                body = json.dumps(
+                    {"events": events, "last": events[-1]["seq"] if events else since}
+                ).encode("utf-8")
+                self._send(200, "application/json", body)
+            else:
+                self._send(404, "text/plain", b"not found")
+
+        def _send(self, status: int, content_type: str, body: bytes) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):  # keep the console clean
+            pass
+
+    return DashboardHandler
+
+
+def serve_dashboard(run_dir: str | Path, port: int = 8787) -> None:
+    events_path = Path(run_dir) / "events.jsonl"
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(events_path))
+    print(f"Dashboard for {run_dir} -> http://127.0.0.1:{port}  (Ctrl+C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()

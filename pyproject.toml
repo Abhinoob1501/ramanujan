@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 demo = ["scikit-learn>=1.3"]
+tracking = ["wandb>=0.17"]
 dev = ["pytest>=8.0", "scikit-learn>=1.3"]
 
 [project.scripts]

@@ -13,3 +13,4 @@ dist/
 
 # experiment outputs
 runs/
+wandb/

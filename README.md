@@ -16,7 +16,11 @@ Named after Srinivasa Ramanujan, who generated extraordinary hypotheses and let 
 results speak.
 
 ```
-+--> PLANNER ---- hypothesis + concrete experiment design
+     KNOWLEDGE BASE ---- semantic recall of insights from past runs
+        |
++--> PLANNER ---- 1 hypothesis, or k candidate branches per round
+|       |
+|   ALLOCATOR --- (branching) the critic funds only the branches worth running
 |       |
 |    ENGINEER --- agentic write / run / read-traceback / fix loop (sandboxed)
 |       |
@@ -25,6 +29,8 @@ results speak.
 +--- CRITIC ----- continue | stop_goal_met | stop_diminishing_returns | stop_flawed
         |
      REPORT ----- leaderboard + narrative + LLM-written conclusions
+        |
+     every step streams to events.jsonl -> live web dashboard
 ```
 
 ## Why this is interesting (not another chat wrapper)
@@ -41,9 +47,27 @@ results speak.
 - **Memory that changes behavior.** The ledger summary (hypotheses, outcomes,
   insights, failures) is injected into every planning step, so the system provably
   builds on what it learned instead of re-running ideas.
-- **Budget-aware science.** Iteration caps, per-experiment wall-clock timeouts, a
-  debug-retry budget, an LLM-call budget, and a Critic whose whole job is refusing
-  to waste compute — including being suspicious of results that look *too good*.
+- **Budget-aware science.** Iteration caps, a total experiment cap, per-experiment
+  wall-clock timeouts, a debug-retry budget, an LLM-call budget, and a Critic whose
+  whole job is refusing to waste compute — including being suspicious of results
+  that look *too good*.
+- **Parallel experiment branches.** Set `budget.parallel_branches: k` and the
+  planner proposes k competing hypotheses per round; the critic then acts as a
+  budget authority, funding only the candidates worth compute (it may fund fewer
+  than k). Each branch gets its own sandbox (`iter_01_a/`, `iter_01_b/`, ...).
+- **Cross-task memory.** Finished runs distill their insights into a global
+  knowledge base (`runs/knowledge.db`); new runs retrieve the most relevant past
+  insights and inject them into planning — lessons transfer across tasks. Pluggable
+  embedders: a local hashing embedder by default (zero network, works offline),
+  Gemini semantic embeddings with `RAMANUJAN_EMBEDDER=gemini`.
+- **Live web dashboard.** Every step is appended to `events.jsonl`;
+  `ramanujan dashboard <run_dir>` serves a zero-dependency live page (stdlib HTTP
+  server) where hypotheses, engineer tool calls, metrics and verdicts stream in
+  as the run executes.
+- **Bring your own data + experiment tracking.** Task specs can list `data_files`
+  (CSVs are staged into each experiment's sandbox), and `tracking.wandb: true`
+  mirrors every experiment to Weights & Biases (hypothesis and approach as config,
+  metrics logged, grouped per run) — degrading to a no-op if wandb isn't configured.
 
 ## Sample session (real output, offline demo)
 
@@ -80,19 +104,27 @@ cp .env.example .env       # set GEMINI_API_KEY / OPENROUTER_API_KEY / OPENCODE_
 ramanujan run tasks/digits_multiclass.yaml            # provider auto-detected
 ramanujan run tasks/digits_multiclass.yaml -p openrouter   # or force one
 
-# 3) Inspect any past run
+# 3) Watch a run live (or replay a finished one) in the browser
+ramanujan dashboard runs/<run_dir>        # -> http://127.0.0.1:8787
+
+# 4) Bring your own CSV + parallel branches (see the spec for the knobs)
+ramanujan run tasks/churn_csv.yaml
+
+# 5) Inspect any past run in the terminal
 ramanujan show runs/<run_dir>
 ```
 
 Each run produces a self-contained directory:
 
 ```
-runs/20260713_194247_breast-cancer-diagnosis/
+runs/20260713_194247_breast-cancer-diagnosis_a1b2c3/
   ledger.db          # every experiment: hypothesis, metrics, insight, failures
+  events.jsonl       # the full reasoning stream (feeds the live dashboard)
   iter_01/train.py   # the code the agent wrote
   iter_01/metrics.json
-  iter_02/...
+  iter_02_a/ ...     # parallel branches get suffixed sandboxes
   report.md          # auto-written research report with leaderboard + conclusions
+runs/knowledge.db    # cross-run knowledge base (insights recalled by future runs)
 ```
 
 ## GPU experiments on RunPod
@@ -147,13 +179,16 @@ This is a guardrail, not a jail — Docker-based isolation is the top roadmap it
 ```
 ramanujan/
   orchestrator.py      # Research Director: deterministic loop around agentic steps
-  task.py              # YAML task spec (dataset, metric, budgets, executor)
+  task.py              # YAML task spec (dataset, metric, budgets, branches, data files)
   report.py            # final research report renderer
+  events.py            # append-only event stream per run (events.jsonl)
+  dashboard.py         # zero-dependency live web dashboard over the event stream
+  tracking.py          # optional Weights & Biases mirroring
   offline.py           # scripted demo session (zero-key end-to-end run)
   agents/
     base.py            # generic tool-loop Agent + schema-validated ask_json()
     engineer.py        # tool-using coder with a self-debug loop
-    roles.py           # Planner / Analyst / Critic decision nodes
+    roles.py           # Planner / Allocator / Analyst / Critic decision nodes
     prompts.py         # all system prompts, reviewable in one place
   executors/
     local.py           # sandboxed subprocess executor
@@ -165,9 +200,10 @@ ramanujan/
     openai_compat.py   # OpenRouter / OpenCode Zen / any OpenAI-style server
     mock.py            # scripted backend for tests + offline mode
   memory/
-    ledger.py          # SQLite experiment ledger (the system's long-term memory)
-tasks/                 # example research task specs (local CPU + RunPod GPU)
-tests/                 # 26 tests incl. a full end-to-end offline research run
+    ledger.py          # SQLite experiment ledger (per-run memory)
+    knowledge.py       # cross-run knowledge base with pluggable embedders
+tasks/                 # example task specs (local CPU, CSV+branches, RunPod GPU)
+tests/                 # 52 tests incl. full end-to-end research runs
 ```
 
 ## Testing
@@ -176,17 +212,19 @@ tests/                 # 26 tests incl. a full end-to-end offline research run
 python -m pytest tests -v
 ```
 
-38 tests cover the ledger, the sandbox executor (timeouts, crashes, stale-metrics
-protection, secret stripping), the agent tool loop (error feedback, step limits,
-JSON self-repair), the engineer (debug loop, budget enforcement, path-escape
-rejection), the OpenAI-compatible backend (message/tool-call conversion, retry
-and degradation behavior), provider auto-detection, and a full end-to-end
-research run that trains real models.
+52 tests cover the ledger, the knowledge base (retrieval ranking, run exclusion),
+the sandbox executor (timeouts, crashes, stale-metrics protection, secret
+stripping), the agent tool loop (error feedback, step limits, JSON self-repair),
+the engineer (debug loop, budget enforcement, path-escape rejection), the
+OpenAI-compatible backend (message/tool-call conversion, retry and degradation
+behavior), provider auto-detection, the event stream (incremental reads, torn
+writes), data-file staging, and full end-to-end research runs — including a
+branched run with budget allocation and cross-run knowledge transfer.
 
 ## Roadmap
 
 - Docker-sandboxed local execution
-- Parallel experiment branches (planner proposes k hypotheses, critic allocates budget)
-- Semantic retrieval over ledgers of *past runs* (cross-task transfer of insights)
-- Dataset upload tasks (CSV path in the spec) and W&B experiment tracking
-- A live web dashboard streaming the agent's reasoning per iteration
+- Concurrent branch execution (branches currently run sequentially within a round,
+  which respects free-tier LLM rate limits)
+- Retrieval-augmented engineer: recall past *code* (not just insights) for reuse
+- Multi-dataset benchmark mode with aggregate reporting across tasks
