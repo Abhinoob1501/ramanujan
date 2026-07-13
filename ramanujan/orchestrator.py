@@ -31,6 +31,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
+from .agents.eda import EdaAgent, EdaFindings
 from .agents.engineer import EngineerAgent, EngineerOutcome
 from .agents.roles import (
     Analysis,
@@ -88,6 +89,7 @@ class ResearchDirector:
         self._experiments_used = 0
         self._current_iteration: int | None = None
         self._reference_code = ""
+        self._eda_findings: EdaFindings | None = None
 
     # ------------------------------------------------------------------ public
 
@@ -99,6 +101,11 @@ class ResearchDirector:
         iteration = 0
 
         try:
+            eda_block = self._run_eda_phase()
+            if eda_block:
+                prior_knowledge = (
+                    f"{eda_block}\n\n{prior_knowledge}" if prior_knowledge else eda_block
+                )
             for iteration in range(1, task.budget.max_iterations + 1):
                 if self._experiments_used >= task.budget.experiment_cap:
                     stop_reason = "experiment_budget_exhausted"
@@ -291,6 +298,37 @@ class ResearchDirector:
         )
         return outcome, analysis
 
+    # ------------------------------------------------------------------- eda
+
+    def _run_eda_phase(self) -> str:
+        """Explore the data before planning. Returns a prompt block ('' if
+        disabled, skipped, or failed - EDA failure must never sink the run)."""
+        if not self.task.eda:
+            return ""
+        if self.task.executor == "runpod":
+            self.console.print("[dim]EDA skipped: dataset lives on the remote GPU pod.[/dim]")
+            return ""
+        workdir = self.run_dir / "eda"
+        staged = self.task.stage_data_files(workdir) if self.task.data_files else []
+        self.events.emit("eda", "eda_started")
+        agent = EdaAgent(self.llms.analyst, self.task, workdir, on_event=self._on_agent_event)
+        outcome = agent.explore(staged_files=staged)
+        if not outcome.success or outcome.findings is None:
+            self._panel("EDA", f"[yellow]Exploration failed ({outcome.error}); "
+                               "planning proceeds without it.[/yellow]", "yellow")
+            self.events.emit("eda", "eda_failed", payload={"error": outcome.error})
+            return ""
+        findings = outcome.findings
+        self._eda_findings = findings
+        body = findings.summary
+        if findings.key_findings:
+            body += "\n" + "\n".join(f"- {f}" for f in findings.key_findings[:5])
+        if findings.leakage_risks:
+            body += "\n[bold yellow]Leakage risks:[/bold yellow] " + "; ".join(findings.leakage_risks)
+        self._panel("EDA", body, "blue")
+        self.events.emit("eda", "eda_findings", agent="eda", payload=findings.model_dump())
+        return findings.to_prompt_block()
+
     # ------------------------------------------------------------- knowledge
 
     def _retrieve_prior_knowledge(self) -> str:
@@ -344,7 +382,10 @@ class ResearchDirector:
         except Exception as exc:  # a dead LLM must not lose the run's artifacts
             conclusions = f"(Conclusions unavailable: {exc})"
         usage = self.llms.usage()
-        report = build_report(self.task, self.ledger, conclusions, stop_reason, usage=usage)
+        report = build_report(
+            self.task, self.ledger, conclusions, stop_reason,
+            usage=usage, eda_findings=self._eda_findings,
+        )
         path = self.run_dir / "report.md"
         path.write_text(report, encoding="utf-8")
         self.events.emit("report", "report_written", payload={"path": str(path)})

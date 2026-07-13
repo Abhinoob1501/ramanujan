@@ -28,8 +28,10 @@ def _clean_env() -> dict:
 
 
 class LocalExecutor:
-    def __init__(self, timeout_seconds: int = 600):
+    def __init__(self, timeout_seconds: int = 600, require_metrics: bool = True):
         self.timeout_seconds = timeout_seconds
+        # EDA/analysis scripts communicate via stdout instead of metrics.json
+        self.require_metrics = require_metrics
 
     def run(self, workdir: Path, script_name: str = "train.py") -> ExecutionResult:
         script = workdir / script_name
@@ -69,6 +71,13 @@ class LocalExecutor:
                 error=f"Exited with code {proc.returncode}.",
             )
         if not metrics_file.exists():
+            if not self.require_metrics:
+                return ExecutionResult(
+                    ok=True,
+                    duration_seconds=duration,
+                    stdout_tail=tail(proc.stdout),
+                    stderr_tail=tail(proc.stderr),
+                )
             return ExecutionResult(
                 ok=False,
                 duration_seconds=duration,

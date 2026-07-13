@@ -61,7 +61,15 @@ def test_debug_loop_left_fixed_code_on_disk(run_result):
 
 def test_report_rendered(run_result):
     report = run_result.report_path.read_text(encoding="utf-8")
+    assert "## Data exploration" in report  # EDA findings section
     assert "## Leaderboard" in report
     assert "## Conclusions" in report
     assert "roc_auc" in report
     assert "```python" in report  # best code appendix
+
+
+def test_eda_ran_for_real(run_result):
+    # the EDA script actually executed against sklearn data
+    assert (run_result.run_dir / "eda" / "eda.py").exists()
+    findings = (run_result.run_dir / "eda" / "findings.json").read_text(encoding="utf-8")
+    assert "standardization" in findings.lower() or "standardized" in findings.lower()

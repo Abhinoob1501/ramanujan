@@ -52,6 +52,7 @@ def branching_task() -> TaskSpec:
             max_iterations=2, parallel_branches=2, max_experiments=4,
             max_debug_attempts=2, experiment_timeout_seconds=30,
         ),
+        eda=False,  # scripted responses in these tests cover the research loop only
     )
 
 

@@ -99,6 +99,45 @@ with open("metrics.json", "w") as f:
 '''
 
 
+_CODE_EDA = '''\
+import numpy as np
+from sklearn.datasets import load_breast_cancer
+
+data = load_breast_cancer()
+X, y = data.data, data.target
+
+print("=== SHAPE ===")
+print(f"{X.shape[0]} samples, {X.shape[1]} numeric features")
+
+print("=== TARGET BALANCE ===")
+print(f"benign (1): {int(y.sum())}, malignant (0): {int((1 - y).sum())}, positive rate {y.mean():.3f}")
+
+print("=== MISSING VALUES ===")
+print(f"NaN count: {int(np.isnan(X).sum())}")
+
+print("=== FEATURE SCALES ===")
+ranges = X.max(axis=0) - X.min(axis=0)
+print(f"feature ranges span {ranges.min():.4f} to {ranges.max():.1f} "
+      "-> scales differ by orders of magnitude; standardization required for scale-sensitive models")
+
+print("=== TOP |CORRELATION| WITH TARGET ===")
+correlations = sorted(
+    ((abs(float(np.corrcoef(X[:, i], y)[0, 1])), name, float(np.corrcoef(X[:, i], y)[0, 1]))
+     for i, name in enumerate(data.feature_names)),
+    reverse=True,
+)
+for _, name, c in correlations[:8]:
+    print(f"  {name}: {c:+.3f}")
+
+print("=== REDUNDANCY CHECK ===")
+worst_idx = [i for i, n in enumerate(data.feature_names) if n.startswith("worst")]
+mean_idx = [i for i, n in enumerate(data.feature_names) if n.startswith("mean")]
+pair_corr = np.corrcoef(X[:, mean_idx[0]], X[:, worst_idx[0]])[0, 1]
+print(f"mean/worst variants of the same measurement are highly correlated "
+      f"(e.g. mean radius vs worst radius: {pair_corr:.3f})")
+'''
+
+
 def _json(payload: dict) -> LLMResponse:
     return LLMResponse(text=json.dumps(payload))
 
@@ -110,6 +149,40 @@ def _tool(name: str, **arguments) -> LLMResponse:
 def build_offline_llm() -> MockLLM:
     """Canned responses in the exact order the orchestrator consumes them."""
     responses: list[LLMResponse] = [
+        # ---- EDA phase (write -> run -> summarize -> distill)
+        _tool("write_file", filename="eda.py", content=_CODE_EDA),
+        _tool("run_script"),
+        LLMResponse(
+            text="Explored the dataset: 569 samples, 30 numeric features, no missing "
+            "values, moderate class imbalance (63% benign). Feature scales differ by "
+            "orders of magnitude, so standardization is required. Several features "
+            "correlate strongly with the target (|r| up to ~0.78) and the mean/worst "
+            "variants are highly redundant. No single feature is predictive enough "
+            "to suggest leakage."
+        ),
+        _json(
+            {
+                "summary": "569 samples x 30 numeric features, no missing values, 63/37 "
+                "class split. Signal is strong and spread across correlated feature "
+                "groups; feature scales vary by orders of magnitude.",
+                "key_findings": [
+                    "No missing values and no constant columns - no imputation needed.",
+                    "Feature scales span orders of magnitude; scale-sensitive models "
+                    "require standardization.",
+                    "Multiple features correlate strongly with the target (|r| up to ~0.78).",
+                    "mean/worst variants of the same measurements are highly redundant.",
+                ],
+                "data_quality_issues": [],
+                "leakage_risks": [
+                    "None observed: no single feature predicts the target near-perfectly."
+                ],
+                "modeling_recommendations": [
+                    "Start with a standardized linear model - strong correlated signal "
+                    "suggests near-linear separability.",
+                    "Use stratified CV because of the 63/37 class imbalance.",
+                ],
+            }
+        ),
         # ---- iteration 1: planner
         _json(
             {

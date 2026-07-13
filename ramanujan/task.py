@@ -60,6 +60,11 @@ class TaskSpec(BaseModel):
     dataset: str = Field(description="How to obtain/load the data, told verbatim to the engineer.")
     metric: MetricSpec
     budget: BudgetSpec = BudgetSpec()
+    eda: bool = Field(
+        default=True,
+        description="Run the EDA agent before planning (skipped automatically for "
+        "runpod tasks, whose data lives on the remote pod).",
+    )
     executor: Literal["local", "docker", "runpod"] = "local"
     environment_notes: str = "Python with scikit-learn, numpy and pandas available. CPU only."
     runpod: dict = Field(default_factory=dict, description="RunPod executor options (gpu_type, image, ...).")

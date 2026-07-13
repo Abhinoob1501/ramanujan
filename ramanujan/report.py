@@ -16,6 +16,7 @@ def build_report(
     conclusions: str,
     stop_reason: str,
     usage: LLMUsage | None = None,
+    eda_findings=None,  # agents.eda.EdaFindings | None
 ) -> str:
     records = ledger.all()
     best = ledger.best(task.metric)
@@ -55,6 +56,19 @@ def build_report(
             f"**Research cost:** {usage.calls} LLM calls, "
             f"{usage.prompt_tokens:,} prompt + {usage.completion_tokens:,} completion tokens{cost}.",
         ]
+
+    if eda_findings is not None:
+        lines += ["", "## Data exploration", "", eda_findings.summary, ""]
+        for title, items in (
+            ("Key findings", eda_findings.key_findings),
+            ("Data quality issues", eda_findings.data_quality_issues),
+            ("Leakage risks", eda_findings.leakage_risks),
+            ("Modeling recommendations", eda_findings.modeling_recommendations),
+        ):
+            if items:
+                lines.append(f"**{title}:**")
+                lines.extend(f"- {item}" for item in items)
+                lines.append("")
 
     lines += ["", "## Leaderboard", "", "| # | Iter | Hypothesis | Status | "
               f"{task.metric.name} | Duration |", "|---|------|------------|--------|--------|----------|"]

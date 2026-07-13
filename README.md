@@ -20,6 +20,10 @@ results speak.
 ```
      KNOWLEDGE BASE ---- semantic recall of insights from past runs
         |
+     EDA AGENT -------- explores the data first: writes & runs a real analysis
+        |               script; findings (balance, scales, leakage risks)
+        |               ground every planning round
+        |
 +--> PLANNER ---- 1 hypothesis, or k candidate branches per round
 |       |
 |   ALLOCATOR --- (branching) the critic funds only the branches worth running
@@ -89,6 +93,12 @@ results speak.
 - **Self-benchmarking.** `ramanujan bench <tasks...> -n 5` measures the agent
   system itself: goal-hit rate, mean experiments per run, failure taxonomy —
   so prompt/model/orchestration changes are evaluated with numbers.
+- **EDA before hypotheses.** A dedicated EDA agent explores the dataset before
+  planning starts — it writes and executes a real analysis script (class balance,
+  missingness, feature scales, target correlations, redundancy, leakage suspects),
+  and the distilled findings are injected into every planning round and the final
+  report. Planner hypotheses are grounded in the actual data, not priors. EDA
+  failure never sinks a run; disable per task with `eda: false`.
 - **Plain-English front door.** `ramanujan ask "..."` composes a full task spec
   from a natural-language request: data files named in the request are inspected
   (columns, types, target candidates) so the spec describes the *real* schema,
@@ -229,6 +239,7 @@ ramanujan/
   offline.py           # scripted demo session (zero-key end-to-end run)
   agents/
     base.py            # generic tool-loop Agent + schema-validated ask_json()
+    eda.py             # data-exploration agent (runs before planning)
     engineer.py        # tool-using coder with a self-debug loop
     roles.py           # Planner / Allocator / Analyst / Critic decision nodes
     prompts.py         # all system prompts, reviewable in one place
@@ -255,7 +266,8 @@ tests/                 # 52 tests incl. full end-to-end research runs
 python -m pytest tests -v
 ```
 
-77 tests cover the natural-language task composer (file detection, schema
+82 tests cover the EDA agent (exploration, distillation, contained failure),
+the natural-language task composer (file detection, schema
 inspection, spec round-tripping), the ledger (incl. fold-spread reporting), the knowledge base
 (retrieval ranking, run exclusion, code storage, schema migration), the local and
 Docker executors (timeouts, crashes, stale-metrics protection, secret stripping,
