@@ -90,6 +90,44 @@ def test_request_file_describes_the_decision(tmp_path):
     assert seen["payload"]["plans"][0]["hypothesis"] == "h"
 
 
+# -------------------------------------------------- run-dir resolution & auto-serve
+
+
+def test_resolve_prefers_exact_run_dir(tmp_path):
+    from ramanujan.dashboard import resolve_run_dir
+
+    run = tmp_path / "20260101_000000_task_aaaaaa"
+    run.mkdir()
+    (run / "events.jsonl").write_text("", encoding="utf-8")
+    assert resolve_run_dir(run) == run
+
+
+def test_resolve_picks_latest_run_under_root(tmp_path):
+    from ramanujan.dashboard import resolve_run_dir
+
+    for name in ("20260101_000000_old_aaaaaa", "20260102_000000_new_bbbbbb"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "events.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "not_a_run").mkdir()  # no events.jsonl -> ignored
+    assert resolve_run_dir(tmp_path).name == "20260102_000000_new_bbbbbb"
+
+
+def test_start_dashboard_server_binds_and_serves(tmp_path):
+    from ramanujan.dashboard import start_dashboard_server
+
+    (tmp_path / "events.jsonl").write_text(
+        '{"seq": 1, "phase": "start", "kind": "run_started", "payload": {}}\n',
+        encoding="utf-8",
+    )
+    server, port = start_dashboard_server(tmp_path, port=0)  # ephemeral port
+    try:
+        data = get_json(f"http://127.0.0.1:{port}/api/events?since=0")
+        assert data["events"][0]["kind"] == "run_started"
+    finally:
+        server.shutdown()
+
+
 # ------------------------------------------------------------- dashboard API
 
 

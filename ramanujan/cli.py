@@ -179,16 +179,26 @@ def run(
 
 
 def _arm_web_gate(director: ResearchDirector):
-    """Web-gated runs make decisions from the dashboard; the gate exchanges
-    files in the run directory, which the dashboard serves buttons for."""
+    """Web-gated runs serve their own dashboard (background thread, correct run
+    directory guaranteed) and exchange decisions through files in the run dir."""
+    from .dashboard import start_dashboard_server
     from .hitl import FileGate
 
-    console.print(
-        f"[bold cyan]Web gate armed.[/bold cyan] In another terminal run:\n"
-        f"  ramanujan dashboard \"{director.run_dir}\"\n"
-        "then decide each checkpoint from http://127.0.0.1:8787"
-    )
-    return FileGate(director.run_dir, console=console)
+    url_hint = ""
+    try:
+        server, port = start_dashboard_server(director.run_dir)
+        director._dashboard_server = server  # keep it alive for the run's lifetime
+        url_hint = f"open http://127.0.0.1:{port}"
+        console.print(
+            f"[bold cyan]Web gate armed.[/bold cyan] Dashboard for this run is live at "
+            f"[bold]http://127.0.0.1:{port}[/bold] - decisions will appear there."
+        )
+    except OSError as exc:
+        console.print(
+            f"[yellow]Could not start the dashboard automatically ({exc}). "
+            f"Serve it manually: ramanujan dashboard \"{director.run_dir}\"[/yellow]"
+        )
+    return FileGate(director.run_dir, console=console, url_hint=url_hint)
 
 
 @app.command(epilog="Example:\n\n  ramanujan show runs/20260714_010606_breast-cancer-diagnosis_a488db")
@@ -395,15 +405,19 @@ def bench(
 
 @app.command(
     epilog=(
-        "Example:\n\n"
-        "  ramanujan dashboard runs/<run_dir>     then open http://127.0.0.1:8787\n\n"
+        "Examples:\n\n"
+        "  ramanujan dashboard                    (serves the LATEST run automatically)\n\n"
+        "  ramanujan dashboard runs/<run_dir>     (serve a specific run)\n\n"
         "Works while the run is still executing (start it in a second terminal) "
-        "and as a replay of any finished run."
+        "and as a replay of any finished run. Note: `run --web` starts a dashboard "
+        "for its own run automatically - no separate command needed."
     )
 )
 def dashboard(
     run_dir: Path = typer.Argument(
-        ..., help="A run directory under runs/ - live (still executing) or finished."
+        Path("runs"),
+        help="A run directory - or a runs root, in which case the most recent "
+        "run is served (default: latest under runs/).",
     ),
     port: int = typer.Option(8787, "--port", help="Local port to serve the dashboard on."),
 ):
@@ -411,11 +425,15 @@ def dashboard(
 
     Streams the run's reasoning into the browser: planner hypotheses, engineer
     tool calls, metrics, analyst insights, critic verdicts and human
-    interventions, with a live best-metric tracker.
+    interventions, with a live best-metric tracker. With no argument, serves
+    the most recent run.
     """
-    from .dashboard import serve_dashboard
+    from .dashboard import resolve_run_dir, serve_dashboard
 
-    serve_dashboard(run_dir, port=port)
+    resolved = resolve_run_dir(run_dir)
+    if resolved != run_dir:
+        console.print(f"[dim]Serving latest run: {resolved}[/dim]")
+    serve_dashboard(resolved, port=port)
 
 
 if __name__ == "__main__":

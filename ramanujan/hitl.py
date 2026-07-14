@@ -78,6 +78,7 @@ class FileGate:
         console: Console | None = None,
         poll_interval: float = 1.0,
         timeout_seconds: float | None = None,
+        url_hint: str = "",
     ):
         self.control_dir = Path(control_dir)
         self.control_dir.mkdir(parents=True, exist_ok=True)
@@ -86,6 +87,7 @@ class FileGate:
         self.console = console or Console()
         self.poll_interval = poll_interval
         self.timeout_seconds = timeout_seconds
+        self.url_hint = url_hint
         self._next_id = 1
 
     def review_plans(self, plans: list[ExperimentPlan], iteration: int) -> PlanReview:
@@ -119,10 +121,10 @@ class FileGate:
             ),
             encoding="utf-8",
         )
+        where = self.url_hint or f"serve with: ramanujan dashboard \"{self.control_dir}\""
         self.console.print(
             f"[bold cyan]Waiting for your decision in the dashboard[/bold cyan] "
-            f"({kind} review, round {iteration}) - "
-            f"serve it with: ramanujan dashboard {self.control_dir}"
+            f"({kind} review, round {iteration}) - {where}"
         )
         deadline = time.time() + self.timeout_seconds if self.timeout_seconds else None
         while True:

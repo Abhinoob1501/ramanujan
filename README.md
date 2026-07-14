@@ -112,9 +112,10 @@ results speak.
   type free-text guidance to force a re-plan, or stop) and after the critic rules
   (accept, or override in either direction). Guidance is remembered and injected
   into every later planning round. With `--web` the same gate is driven from the
-  live dashboard instead: the run pauses, a decision card appears in the browser
-  with Run / Guide-and-replan / Stop buttons (file-backed request/response, so
-  any remote UI could drive it). The default remains fully autonomous.
+  live dashboard instead: the run serves its own dashboard (no second terminal),
+  prints the URL, and a decision card appears in the browser with Run /
+  Guide-and-replan / Stop buttons (file-backed request/response, so any remote
+  UI could drive it). The default remains fully autonomous.
 - **Plain-English front door.** `ramanujan ask "..."` composes a full task spec
   from a natural-language request: data files named in the request are inspected
   (columns, types, target candidates) so the spec describes the *real* schema,
@@ -167,9 +168,9 @@ ramanujan run tasks/digits_multiclass.yaml -p openrouter   # or force one
 # 3) Watch a run live (or replay a finished one) in the browser
 ramanujan dashboard runs/<run_dir>        # -> http://127.0.0.1:8787
 
-# 3b) Steer a run FROM the browser: approve/guide/stop buttons appear
-#     in the dashboard at each checkpoint
-ramanujan run tasks/churn_csv.yaml --web   # + `ramanujan dashboard <run_dir>` in another terminal
+# 3b) Steer a run FROM the browser: --web starts the dashboard automatically
+#     and pauses at each checkpoint with approve/guide/stop buttons
+ramanujan run tasks/churn_csv.yaml --web   # prints the URL, e.g. http://127.0.0.1:8787
 
 # 4) Bring your own CSV + parallel branches (see the spec for the knobs)
 ramanujan run tasks/churn_csv.yaml

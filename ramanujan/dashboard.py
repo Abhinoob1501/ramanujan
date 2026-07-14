@@ -12,6 +12,7 @@ Deliberately dependency-free: stdlib http.server + a self-contained HTML page.
 from __future__ import annotations
 
 import json
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -285,7 +286,47 @@ def make_handler(run_dir: Path):
     return DashboardHandler
 
 
+def resolve_run_dir(path: str | Path) -> Path:
+    """Accept either a specific run directory or a runs root; in the latter
+    case serve the most recent run that has an event stream. Run directories
+    are timestamped, so users pointing at yesterday's dir (or the wrong one)
+    was a common footgun - `ramanujan dashboard` with no argument now just
+    works."""
+    path = Path(path)
+    if (path / "events.jsonl").exists():
+        return path
+    if path.is_dir():
+        candidates = sorted(
+            (d for d in path.iterdir() if d.is_dir() and (d / "events.jsonl").exists()),
+            key=lambda d: d.name,
+        )
+        if candidates:
+            return candidates[-1]
+    return path  # serve as-is; the page will wait for events
+
+
+def start_dashboard_server(
+    run_dir: str | Path, port: int = 8787, max_port_tries: int = 10
+) -> tuple[ThreadingHTTPServer, int]:
+    """Start the dashboard on a daemon thread (used by `run --web` so no second
+    terminal is needed). If the port is busy, the next few are tried. Returns
+    (server, bound_port)."""
+    last_error: OSError | None = None
+    for candidate in range(port, port + max_port_tries):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", candidate), make_handler(Path(run_dir)))
+        except OSError as exc:
+            last_error = exc
+            continue
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server, server.server_address[1]
+    raise OSError(
+        f"No free port in {port}-{port + max_port_tries - 1} for the dashboard: {last_error}"
+    )
+
+
 def serve_dashboard(run_dir: str | Path, port: int = 8787) -> None:
+    run_dir = resolve_run_dir(run_dir)
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(Path(run_dir)))
     print(f"Dashboard for {run_dir} -> http://127.0.0.1:{port}  (Ctrl+C to stop)")
     try:
